@@ -1,0 +1,335 @@
+{
+  "name": "imview",
+  "displayName": "ImView",
+  "description": "Debug-time image visualization for OpenCV and custom image types",
+  "version": "0.1.0",
+  "publisher": "imview",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Debuggers",
+    "Visualization"
+  ],
+  "keywords": [
+    "opencv",
+    "image",
+    "debug",
+    "visualization",
+    "cv::Mat"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "imviewPanel",
+          "title": "ImView",
+          "icon": "$(eye)"
+        }
+      ]
+    },
+    "views": {
+      "imviewPanel": [
+        {
+          "id": "imview.imageList",
+          "name": "Image List"
+        },
+        {
+          "type": "webview",
+          "id": "imview.imageViewer",
+          "name": "Image Viewer"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "imview.imageList",
+        "contents": "No active debug session.\n\n[Start Debugging](command:workbench.action.debug.start)\n\nImView displays image variables (cv::Mat, etc.) when debugging C/C++ programs."
+      }
+    ],
+    "commands": [
+      {
+        "command": "imview.refresh",
+        "title": "Refresh Images",
+        "icon": "$(refresh)",
+        "category": "ImView"
+      },
+      {
+        "command": "imview.addWatch",
+        "title": "Add Watch Expression",
+        "icon": "$(add)",
+        "category": "ImView"
+      },
+      {
+        "command": "imview.removeWatch",
+        "title": "Remove Watch Expression",
+        "icon": "$(trash)",
+        "category": "ImView"
+      },
+      {
+        "command": "imview.openInEditor",
+        "title": "Open in Editor Tab",
+        "icon": "$(go-to-file)",
+        "category": "ImView"
+      },
+      {
+        "command": "imview.exportImage",
+        "title": "Export Image",
+        "icon": "$(save)",
+        "category": "ImView"
+      },
+      {
+        "command": "imview.copyPixelValue",
+        "title": "Copy Pixel Value",
+        "category": "ImView"
+      },
+      {
+        "command": "imview.visualizeVariable",
+        "title": "View Image",
+        "icon": "$(eye)",
+        "category": "ImView"
+      },
+      {
+        "command": "imview.visualizeVariableInPanel",
+        "title": "View Image in Panel",
+        "icon": "$(preview)",
+        "category": "ImView"
+      },
+      {
+        "command": "imview.addToWatch",
+        "title": "Add to ImView",
+        "icon": "$(add)",
+        "category": "ImView"
+      },
+      {
+        "command": "imview.openViewerPanel",
+        "title": "Open Image Viewer Panel",
+        "icon": "$(eye)",
+        "category": "ImView"
+      },
+      {
+        "command": "imview.moveViewerToSecondary",
+        "title": "Move Viewer to Right Sidebar",
+        "category": "ImView"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "imview.refresh",
+          "when": "view == imview.imageList",
+          "group": "navigation"
+        },
+        {
+          "command": "imview.addWatch",
+          "when": "view == imview.imageList",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "imview.openInEditor",
+          "when": "view == imview.imageList && viewItem == imageItem",
+          "group": "inline"
+        },
+        {
+          "command": "imview.exportImage",
+          "when": "view == imview.imageList && viewItem == imageItem",
+          "group": "1_actions"
+        },
+        {
+          "command": "imview.removeWatch",
+          "when": "view == imview.imageList && viewItem == watchItem",
+          "group": "2_modify"
+        }
+      ],
+      "debug/variables/context": [
+        {
+          "command": "imview.visualizeVariable",
+          "group": "3_modifications@1",
+          "when": "inDebugMode && imview.hasImageVariables"
+        },
+        {
+          "command": "imview.addToWatch",
+          "group": "3_modifications@2",
+          "when": "inDebugMode && imview.hasImageVariables"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "imview.visualizeVariable",
+          "when": "inDebugMode && editorTextFocus",
+          "group": "9_imview"
+        },
+        {
+          "command": "imview.addToWatch",
+          "when": "inDebugMode && editorHasSelection",
+          "group": "9_imview"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "imview.visualizeVariable",
+          "when": "inDebugMode"
+        },
+        {
+          "command": "imview.addToWatch",
+          "when": "inDebugMode"
+        },
+        {
+          "command": "imview.openViewerPanel",
+          "when": "inDebugMode"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "ImView",
+      "properties": {
+        "imview.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically refresh images when debugger stops"
+        },
+        "imview.defaultColormap": {
+          "type": "string",
+          "default": "grayscale",
+          "enum": [
+            "grayscale",
+            "jet",
+            "hot",
+            "cool",
+            "viridis",
+            "plasma"
+          ],
+          "description": "Default colormap for single-channel images"
+        },
+        "imview.maxImageSize": {
+          "type": "number",
+          "default": 4096,
+          "description": "Maximum image dimension (width or height) to display"
+        },
+        "imview.thumbnailSize": {
+          "type": "number",
+          "default": 64,
+          "description": "Size of thumbnail images in the list view"
+        },
+        "imview.autoNormalize": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically normalize image values for display"
+        },
+        "imview.showPixelGrid": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show pixel grid when zoomed in"
+        },
+        "imview.pixelGridZoomThreshold": {
+          "type": "number",
+          "default": 8,
+          "description": "Minimum zoom level to show pixel grid"
+        },
+        "imview.viewerLocation": {
+          "type": "string",
+          "default": "panel",
+          "enum": [
+            "panel",
+            "editor",
+            "sidebar"
+          ],
+          "enumDescriptions": [
+            "Show in bottom panel (can be moved to right sidebar)",
+            "Show in editor tab",
+            "Show in left sidebar"
+          ],
+          "description": "Default location for the Image Viewer"
+        },
+        "imview.customTypes": {
+          "type": "array",
+          "default": [],
+          "description": "Custom image type definitions",
+          "items": {
+            "type": "object",
+            "properties": {
+              "typeName": {
+                "type": "string",
+                "description": "The C++ type name to match"
+              },
+              "properties": {
+                "type": "object",
+                "properties": {
+                  "width": {
+                    "type": "string",
+                    "description": "Expression to get width"
+                  },
+                  "height": {
+                    "type": "string",
+                    "description": "Expression to get height"
+                  },
+                  "channels": {
+                    "type": "string",
+                    "description": "Expression to get channel count"
+                  },
+                  "data": {
+                    "type": "string",
+                    "description": "Expression to get data pointer"
+                  },
+                  "stride": {
+                    "type": "string",
+                    "description": "Expression to get row stride"
+                  },
+                  "pixelType": {
+                    "type": "string",
+                    "enum": [
+                      "uint8",
+                      "int8",
+                      "uint16",
+                      "int16",
+                      "int32",
+                      "float32",
+                      "float64"
+                    ],
+                    "description": "Pixel data type"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile",
+    "test": "node ./out/test/runTest.js",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.18.0",
+    "@typescript-eslint/parser": "^6.18.0",
+    "@vscode/test-electron": "^2.3.8",
+    "@vscode/vsce": "^2.19.0",
+    "eslint": "^8.56.0",
+    "glob": "^10.3.10",
+    "mocha": "^10.2.0",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.3.3",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "overrides": {
+    "undici": "5.28.4"
+  }
+}

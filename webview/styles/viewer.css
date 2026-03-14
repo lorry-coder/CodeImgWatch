@@ -1,0 +1,286 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: var(--vscode-font-family);
+    font-size: var(--vscode-font-size);
+    color: var(--vscode-foreground);
+    background-color: var(--vscode-editor-background);
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+}
+
+#app {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    width: 100%;
+}
+
+/* Toolbar */
+#toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 4px 8px;
+    background-color: var(--vscode-sideBar-background);
+    border-bottom: 1px solid var(--vscode-sideBar-border);
+    min-height: 32px;
+    align-items: center;
+}
+
+.toolbar-group {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+}
+
+.toolbar-group:not(:last-child) {
+    padding-right: 8px;
+    border-right: 1px solid var(--vscode-sideBar-border);
+}
+
+#toolbar button {
+    padding: 2px 8px;
+    background-color: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+    border: none;
+    cursor: pointer;
+    border-radius: 2px;
+    font-size: 11px;
+}
+
+#toolbar button:hover {
+    background-color: var(--vscode-button-secondaryHoverBackground);
+}
+
+#toolbar button:active {
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+}
+
+#toolbar select {
+    padding: 2px 4px;
+    background-color: var(--vscode-dropdown-background);
+    color: var(--vscode-dropdown-foreground);
+    border: 1px solid var(--vscode-dropdown-border);
+    border-radius: 2px;
+    font-size: 11px;
+}
+
+#toolbar label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+#toolbar input[type="checkbox"] {
+    cursor: pointer;
+}
+
+#zoom-level {
+    font-size: 11px;
+    min-width: 45px;
+    text-align: center;
+    color: var(--vscode-descriptionForeground);
+}
+
+/* Canvas Container */
+#canvas-container {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    background-color: var(--vscode-editor-background);
+    background-image:
+        linear-gradient(45deg, var(--vscode-editorWidget-background) 25%, transparent 25%),
+        linear-gradient(-45deg, var(--vscode-editorWidget-background) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, var(--vscode-editorWidget-background) 75%),
+        linear-gradient(-45deg, transparent 75%, var(--vscode-editorWidget-background) 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+}
+
+#image-canvas {
+    position: absolute;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+}
+
+/* Loading Overlay */
+#loading {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background-color: rgba(0, 0, 0, 0.5);
+    color: var(--vscode-foreground);
+    z-index: 100;
+}
+
+#loading .spinner {
+    width: 32px;
+    height: 32px;
+    border: 3px solid var(--vscode-progressBar-background);
+    border-top-color: var(--vscode-button-background);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Error Message */
+#error-message {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    padding: 16px 24px;
+    background-color: var(--vscode-inputValidation-errorBackground);
+    border: 1px solid var(--vscode-inputValidation-errorBorder);
+    border-radius: 4px;
+    color: var(--vscode-errorForeground);
+    text-align: center;
+    max-width: 80%;
+    z-index: 90;
+}
+
+/* No Image Placeholder */
+#no-image {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: var(--vscode-descriptionForeground);
+    text-align: center;
+}
+
+/* Status Bar */
+#status-bar {
+    display: flex;
+    gap: 16px;
+    padding: 2px 8px;
+    background-color: var(--vscode-statusBar-background);
+    color: var(--vscode-statusBar-foreground);
+    font-size: 11px;
+    border-top: 1px solid var(--vscode-statusBar-border);
+    min-height: 22px;
+    align-items: center;
+}
+
+#status-bar span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#image-info {
+    flex: 1;
+}
+
+#pixel-info {
+    min-width: 150px;
+}
+
+#cursor-pos {
+    min-width: 80px;
+    text-align: right;
+}
+
+/* Pixel Value Overlay */
+.pixel-value-overlay {
+    position: absolute;
+    font-family: monospace;
+    font-size: 9px;
+    color: white;
+    text-shadow: 0 0 2px black, 0 0 2px black;
+    pointer-events: none;
+    text-align: center;
+}
+
+/* Hidden class */
+.hidden {
+    display: none !important;
+}
+
+/* Editor mode specific styles */
+.editor-mode #toolbar {
+    padding: 6px 12px;
+}
+
+.editor-mode #canvas-container {
+    background-size: 20px 20px;
+    background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+}
+
+/* Pixel highlight */
+.pixel-highlight {
+    position: absolute;
+    border: 1px solid var(--vscode-focusBorder);
+    pointer-events: none;
+    z-index: 50;
+}
+
+/* Crosshair cursor when over image */
+#canvas-container.has-image {
+    cursor: crosshair;
+}
+
+/* Grabbing cursor when dragging */
+#canvas-container.dragging {
+    cursor: grabbing;
+}
+
+/* Tooltip */
+.pixel-tooltip {
+    position: absolute;
+    padding: 4px 8px;
+    background-color: var(--vscode-editorHoverWidget-background);
+    border: 1px solid var(--vscode-editorHoverWidget-border);
+    border-radius: 3px;
+    font-family: monospace;
+    font-size: 11px;
+    color: var(--vscode-editorHoverWidget-foreground);
+    pointer-events: none;
+    z-index: 1000;
+    white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+/* Responsive adjustments */
+@media (max-width: 400px) {
+    #toolbar {
+        padding: 2px 4px;
+        gap: 4px;
+    }
+
+    .toolbar-group {
+        gap: 2px;
+    }
+
+    .toolbar-group:not(:last-child) {
+        padding-right: 4px;
+    }
+
+    #toolbar button {
+        padding: 2px 4px;
+        font-size: 10px;
+    }
+
+    #status-bar {
+        font-size: 10px;
+        gap: 8px;
+    }
+}

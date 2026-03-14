@@ -1,0 +1,282 @@
+import * as vscode from 'vscode';
+import { DebugSessionManager, EvaluateResponse, VariableInfo } from '../core/debugSessionManager';
+import { ImageMetadata, ParseResult, DebuggerType } from '../types';
+
+/**
+ * Interface for image type parsers
+ */
+export interface IImageParser {
+    /**
+     * Unique name of this parser
+     */
+    readonly name: string;
+
+    /**
+     * Priority for type matching (higher = checked first)
+     */
+    readonly priority: number;
+
+    /**
+     * Check if this parser can handle the given type
+     */
+    canParse(typeName: string): boolean;
+
+    /**
+     * Parse image metadata from a variable
+     */
+    parse(
+        session: DebugSessionManager,
+        expression: string,
+        evaluateResult: EvaluateResponse
+    ): Promise<ParseResult>;
+}
+
+/**
+ * Registry for image parsers
+ */
+export class ImageParserRegistry {
+    private static instance: ImageParserRegistry | undefined;
+    private parsers: IImageParser[] = [];
+
+    private constructor() {}
+
+    public static getInstance(): ImageParserRegistry {
+        if (!ImageParserRegistry.instance) {
+            ImageParserRegistry.instance = new ImageParserRegistry();
+        }
+        return ImageParserRegistry.instance;
+    }
+
+    /**
+     * Register a parser
+     */
+    public register(parser: IImageParser): void {
+        this.parsers.push(parser);
+        // Sort by priority (highest first)
+        this.parsers.sort((a, b) => b.priority - a.priority);
+    }
+
+    /**
+     * Find a parser that can handle the given type
+     */
+    public findParser(typeName: string): IImageParser | undefined {
+        return this.parsers.find(p => p.canParse(typeName));
+    }
+
+    /**
+     * Get all registered parsers
+     */
+    public getAllParsers(): IImageParser[] {
+        return [...this.parsers];
+    }
+
+    /**
+     * Clear all parsers (for testing)
+     */
+    public clear(): void {
+        this.parsers = [];
+    }
+}
+
+/**
+ * Base class for image parsers with common functionality
+ */
+export abstract class BaseImageParser implements IImageParser {
+    abstract readonly name: string;
+    abstract readonly priority: number;
+
+    abstract canParse(typeName: string): boolean;
+    abstract parse(
+        session: DebugSessionManager,
+        expression: string,
+        evaluateResult: EvaluateResponse
+    ): Promise<ParseResult>;
+
+    /**
+     * Get a member variable by name from a struct
+     */
+    protected async getMember(
+        session: DebugSessionManager,
+        variablesReference: number,
+        memberName: string
+    ): Promise<VariableInfo | undefined> {
+        return session.getMemberValue(variablesReference, memberName);
+    }
+
+    /**
+     * Evaluate a sub-expression
+     */
+    protected async evaluateExpression(
+        session: DebugSessionManager,
+        expression: string
+    ): Promise<EvaluateResponse | undefined> {
+        return session.evaluate(expression);
+    }
+
+    /**
+     * Parse an integer value from a variable
+     */
+    protected parseIntValue(value: string): number | undefined {
+        // Handle hex
+        if (value.startsWith('0x') || value.startsWith('0X')) {
+            return parseInt(value, 16);
+        }
+
+        // Handle decimal (may have trailing info like type annotations)
+        const match = value.match(/^-?\d+/);
+        if (match) {
+            return parseInt(match[0], 10);
+        }
+
+        return undefined;
+    }
+
+    /**
+     * Parse a pointer address from a value string
+     */
+    protected parsePointerValue(value: string): string | undefined {
+        // Match hex address
+        const hexMatch = value.match(/0x[0-9a-fA-F]+/);
+        if (hexMatch) {
+            return hexMatch[0];
+        }
+
+        // Plain hex without prefix
+        const plainMatch = value.match(/^[0-9a-fA-F]{8,16}\b/);
+        if (plainMatch) {
+            return '0x' + plainMatch[0];
+        }
+
+        return undefined;
+    }
+
+    /**
+     * Get member value as integer
+     */
+    protected async getMemberAsInt(
+        session: DebugSessionManager,
+        variablesReference: number,
+        memberName: string
+    ): Promise<number | undefined> {
+        const member = await this.getMember(session, variablesReference, memberName);
+        if (member) {
+            return this.parseIntValue(member.value);
+        }
+        return undefined;
+    }
+
+    /**
+     * Get member value as pointer address
+     */
+    protected async getMemberAsPointer(
+        session: DebugSessionManager,
+        variablesReference: number,
+        memberName: string
+    ): Promise<string | undefined> {
+        const member = await this.getMember(session, variablesReference, memberName);
+        if (member) {
+            // First check memoryReference
+            if (member.memoryReference) {
+                return member.memoryReference;
+            }
+            // Fall back to parsing value
+            return this.parsePointerValue(member.value);
+        }
+        return undefined;
+    }
+
+    /**
+     * Evaluate expression and get as integer
+     */
+    protected async evaluateAsInt(
+        session: DebugSessionManager,
+        expression: string
+    ): Promise<number | undefined> {
+        const result = await this.evaluateExpression(session, expression);
+        if (result) {
+            return this.parseIntValue(result.result);
+        }
+        return undefined;
+    }
+
+    /**
+     * Evaluate expression and get as pointer
+     */
+    protected async evaluateAsPointer(
+        session: DebugSessionManager,
+        expression: string
+    ): Promise<string | undefined> {
+        const result = await this.evaluateExpression(session, expression);
+        if (result) {
+            if (result.memoryReference) {
+                return result.memoryReference;
+            }
+            return this.parsePointerValue(result.result);
+        }
+        return undefined;
+    }
+
+    /**
+     * Generate a unique ID for an image
+     */
+    protected generateImageId(expression: string): string {
+        return `img_${Date.now()}_${expression.replace(/[^a-zA-Z0-9]/g, '_')}`;
+    }
+
+    /**
+     * Create an error result
+     */
+    protected errorResult(message: string): ParseResult {
+        return {
+            success: false,
+            error: message,
+        };
+    }
+
+    /**
+     * Create a success result
+     */
+    protected successResult(metadata: ImageMetadata, warnings?: string[]): ParseResult {
+        return {
+            success: true,
+            metadata,
+            warnings,
+        };
+    }
+}
+
+/**
+ * Check if a type name matches known image types
+ */
+export function isKnownImageType(typeName: string): boolean {
+    const knownPatterns = [
+        /cv::Mat\b/,
+        /cv::Mat_</,
+        /cv::Matx</,
+        /cv::UMat\b/,
+        /\bCvMat\b/,
+        /\bIplImage\b/,
+    ];
+
+    return knownPatterns.some(pattern => pattern.test(typeName));
+}
+
+/**
+ * Normalize a type name for comparison
+ */
+export function normalizeTypeName(typeName: string): string {
+    // Remove leading/trailing whitespace
+    let normalized = typeName.trim();
+
+    // Remove const qualifiers
+    normalized = normalized.replace(/\bconst\s+/g, '');
+    normalized = normalized.replace(/\s+const\b/g, '');
+
+    // Remove reference/pointer suffixes for base type comparison
+    normalized = normalized.replace(/\s*[&*]+\s*$/, '');
+
+    // Remove class/struct keywords
+    normalized = normalized.replace(/^(class|struct)\s+/, '');
+
+    return normalized;
+}
