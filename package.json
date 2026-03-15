@@ -2,7 +2,7 @@
   "name": "imview",
   "displayName": "ImView",
   "description": "Debug-time image visualization for OpenCV and custom image types",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "imview",
   "engines": {
     "vscode": "^1.85.0"

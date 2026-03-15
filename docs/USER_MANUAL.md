@@ -38,13 +38,14 @@
 
 ## 1. 简介
 
-**ImView for VS Code** 是一个用于 C/C++ 调试的图像可视化插件，类似于 Visual Studio 的 ImView 功能。它允许开发者在调试过程中实时查看和分析图像数据，特别适用于 OpenCV 图像处理开发。
+**ImView for VS Code** 是一个用于 C/C++ 和 Python 调试的图像可视化插件，类似于 Visual Studio 的 ImView 功能。它允许开发者在调试过程中实时查看和分析图像数据，特别适用于 OpenCV 图像处理和深度学习开发。
 
 ### 主要特性
 
 - ✅ 实时查看调试中的图像变量
-- ✅ 支持 OpenCV 全系列类型 (`cv::Mat`, `cv::Mat_<T>`, `cv::Matx`, `CvMat`, `IplImage`)
-- ✅ 支持多种调试器 (GDB, LLDB, MSVC)
+- ✅ 支持 C++ OpenCV 全系列类型 (`cv::Mat`, `cv::Mat_<T>`, `cv::Matx`, `CvMat`, `IplImage`)
+- ✅ 支持 Python 图像类型 (`numpy.ndarray`, `PIL.Image`, `torch.Tensor`)
+- ✅ 支持多种调试器 (GDB, LLDB, MSVC, debugpy)
 - ✅ 交互式图像查看器（缩放、平移、像素检查）
 - ✅ 图像操作符（通道提取、阈值、差异对比等）
 - ✅ 自定义图像类型扩展
@@ -60,7 +61,7 @@
 |------|------|
 | VS Code | 1.85.0 或更高版本 |
 | 操作系统 | Windows x86/x64, Linux x86/x64 |
-| 调试器 | GDB, LLDB, 或 MSVC Debugger |
+| 调试器 | GDB, LLDB, MSVC Debugger, 或 debugpy (Python) |
 
 ### 2.2 安装插件
 
@@ -88,6 +89,7 @@ code --install-extension imview-0.1.0.vsix
 | `cppdbg` | C/C++ (ms-vscode.cpptools) | GDB/LLDB on Linux/macOS/Windows |
 | `cppvsdbg` | C/C++ (ms-vscode.cpptools) | MSVC on Windows |
 | `lldb` | CodeLLDB (vadimcn.vscode-lldb) | LLDB on Linux/macOS |
+| `debugpy` | Python (ms-python.python) | Python debugging |
 
 #### launch.json 示例 (GDB)
 
@@ -118,11 +120,30 @@ code --install-extension imview-0.1.0.vsix
 }
 ```
 
+#### launch.json 示例 (Python)
+
+```json
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        }
+    ]
+}
+```
+
 ---
 
 ## 3. 快速入门
 
-### 步骤 1: 编写测试程序
+### C++ 快速入门
+
+#### 步骤 1: 编写测试程序
 
 ```cpp
 #include <opencv2/opencv.hpp>
@@ -146,13 +167,51 @@ int main() {
 }
 ```
 
-### 步骤 2: 启动调试
+#### 步骤 2: 启动调试
 
 1. 在 `std::cout` 行设置断点
 2. 按 `F5` 启动调试
 3. 程序在断点处暂停
 
-### 步骤 3: 查看图像
+### Python 快速入门
+
+#### 步骤 1: 编写测试程序
+
+```python
+import numpy as np
+import cv2
+from PIL import Image
+import torch
+
+# NumPy 图像 (通过 OpenCV 读取)
+img_cv = cv2.imread('test.jpg')
+
+# NumPy 随机图像
+img_np = np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)
+
+# NumPy 灰度图
+img_gray = np.zeros((100, 100), dtype=np.uint8)
+
+# NumPy float 图像
+img_float = np.random.rand(50, 50).astype(np.float32)
+
+# PIL 图像
+img_pil = Image.fromarray(img_np)
+
+# PyTorch 张量 (CHW 格式, 仅支持 CPU)
+img_torch = torch.rand(3, 64, 64)
+
+# 在此设置断点
+breakpoint()  # 或者在此行点击设置断点
+```
+
+#### 步骤 2: 启动调试
+
+1. 在 `breakpoint()` 行设置断点
+2. 按 `F5` 启动调试
+3. 程序在断点处暂停
+
+### 查看图像
 
 **方法一：从 ImView 面板**
 1. 在 VS Code 底部面板区域找到 **ImView** 面板
@@ -252,6 +311,8 @@ int main() {
 当调试器在断点处暂停时，插件会自动扫描当前作用域中的局部变量，识别并列出所有图像类型变量。
 
 **支持的检测类型：**
+
+**C++:**
 - `cv::Mat`
 - `cv::Mat_<T>`
 - `cv::Matx<T, m, n>`
@@ -259,6 +320,11 @@ int main() {
 - `CvMat`
 - `IplImage`
 - 用户自定义类型
+
+**Python:**
+- `numpy.ndarray` (包括 OpenCV-Python 返回的数组)
+- `PIL.Image.Image`
+- `torch.Tensor` (仅 CPU)
 
 ### 5.2 手动添加监视表达式 (Watch 模式)
 
@@ -442,7 +508,57 @@ file.read(reinterpret_cast<char*>(data.data()), data.size());
 
 ## 6. 支持的图像类型
 
-### 6.1 OpenCV 类型
+### 6.1 Python 图像类型
+
+#### numpy.ndarray
+
+NumPy 数组是 Python 中最常用的图像格式，也是 OpenCV-Python 和 scikit-image 的默认格式。
+
+| 维度 | 格式 | 说明 |
+|------|------|------|
+| 2D (H, W) | 灰度图 | 单通道图像 |
+| 3D (H, W, C) | 彩色图 | C 为通道数 (1-4) |
+
+**支持的 dtype：**
+
+| NumPy dtype | 说明 |
+|-------------|------|
+| `uint8` | 最常用格式 (0-255) |
+| `int8` | 有符号字节 |
+| `uint16` | 高精度灰度 |
+| `int16` | 有符号短整数 |
+| `int32` | 整数图像 |
+| `float32` | 浮点图像 |
+| `float64` | 双精度浮点 |
+
+#### PIL.Image.Image
+
+Pillow 图像对象，支持多种模式：
+
+| 模式 | 说明 |
+|------|------|
+| `L` | 灰度 |
+| `RGB` | 24-bit 彩色 |
+| `RGBA` | 32-bit 带透明通道 |
+| `I` | 32-bit 整数 |
+| `F` | 32-bit 浮点 |
+
+#### torch.Tensor
+
+PyTorch 张量，**仅支持 CPU 张量**。
+
+| 维度 | 格式 | 说明 |
+|------|------|------|
+| 2D (H, W) | 灰度图 | 单通道 |
+| 3D (C, H, W) | CHW 格式 | PyTorch 默认格式 |
+| 4D (N, C, H, W) | 批量图像 | 取第一张 |
+
+**注意事项：**
+- GPU 张量需要先调用 `.cpu()` 移到 CPU
+- CHW 格式会自动转换为 HWC 格式显示
+- 支持 `torch.float32`, `torch.float64`, `torch.uint8` 等常见 dtype
+
+### 6.2 C++ OpenCV 类型
 
 #### cv::Mat
 
@@ -493,7 +609,7 @@ cv::Vec4b pixel;
 | CvMat | OpenCV C 接口矩阵 |
 | IplImage | OpenCV 1.x 图像格式 |
 
-### 6.2 自定义类型配置
+### 6.3 自定义类型配置
 
 对于非 OpenCV 的图像类型，可以通过配置文件定义解析规则。
 
@@ -662,6 +778,18 @@ cv::Vec4b pixel;
 ---
 
 ## 10. 更新日志
+
+### v0.1.1 (2026-03-15)
+
+**新增 Python 调试器支持**
+
+- ✅ 支持 Python debugpy 调试器
+- ✅ 支持 `numpy.ndarray` 图像可视化 (包括 OpenCV-Python)
+- ✅ 支持 `PIL.Image.Image` 图像可视化
+- ✅ 支持 `torch.Tensor` 张量可视化 (仅 CPU)
+- ✅ 自动处理 PyTorch CHW 格式转换为 HWC
+- ✅ 支持多种 NumPy dtype (uint8, int8, uint16, int16, int32, float32, float64)
+- ✅ 分块传输大图像数据，解决 debugpy 输出限制问题
 
 ### v0.1.0 (2026-03-14)
 

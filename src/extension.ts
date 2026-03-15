@@ -37,7 +37,8 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
         vscode.debug.registerDebugAdapterTrackerFactory('cppdbg', debugAdapterTrackerFactory),
         vscode.debug.registerDebugAdapterTrackerFactory('cppvsdbg', debugAdapterTrackerFactory),
-        vscode.debug.registerDebugAdapterTrackerFactory('lldb', debugAdapterTrackerFactory)
+        vscode.debug.registerDebugAdapterTrackerFactory('lldb', debugAdapterTrackerFactory),
+        vscode.debug.registerDebugAdapterTrackerFactory('debugpy', debugAdapterTrackerFactory)
     );
 
     // Register tree view

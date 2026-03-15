@@ -1,12 +1,12 @@
 # ImView for VS Code
 
-A VS Code extension for visualizing image data during C/C++ debugging sessions. Similar to Visual Studio's ImView, this extension allows you to inspect OpenCV `cv::Mat` and other image types in real-time while debugging.
+A VS Code extension for visualizing image data during C/C++ and Python debugging sessions. Similar to Visual Studio's ImView, this extension allows you to inspect OpenCV `cv::Mat`, NumPy arrays, PIL images, PyTorch tensors, and other image types in real-time while debugging.
 
 ## Features
 
 - **Real-time Image Visualization**: View image variables during debug sessions
-- **Multiple Image Types**: Support for OpenCV `cv::Mat`, `cv::Mat_<T>`, `cv::Matx`, `CvMat`, `IplImage`, and custom types
-- **Multiple Debuggers**: Works with GDB (`cppdbg`), LLDB (`lldb`), and MSVC (`cppvsdbg`) debuggers
+- **Multiple Image Types**: Support for OpenCV `cv::Mat`, `cv::Mat_<T>`, `cv::Matx`, `CvMat`, `IplImage`, NumPy `ndarray`, PIL `Image`, PyTorch `Tensor`, and custom types
+- **Multiple Debuggers**: Works with GDB (`cppdbg`), LLDB (`lldb`), MSVC (`cppvsdbg`), and Python (`debugpy`) debuggers
 - **Interactive Viewer**:
   - Zoom and pan with mouse wheel and drag
   - Pixel value inspection on hover
@@ -25,6 +25,8 @@ A VS Code extension for visualizing image data during C/C++ debugging sessions. 
 
 ## Supported Image Types
 
+### C++ (OpenCV)
+
 | Type | Description |
 |------|-------------|
 | `cv::Mat` | Standard OpenCV matrix |
@@ -34,6 +36,14 @@ A VS Code extension for visualizing image data during C/C++ debugging sessions. 
 | `CvMat` | Legacy OpenCV C interface |
 | `IplImage` | OpenCV 1.x image format |
 | Custom types | User-defined via configuration |
+
+### Python
+
+| Type | Source | Description |
+|------|--------|-------------|
+| `numpy.ndarray` | NumPy, OpenCV-Python, scikit-image | Most common image format in Python |
+| `PIL.Image.Image` | Pillow | Python Imaging Library |
+| `torch.Tensor` | PyTorch | Deep learning tensors (CPU only) |
 
 ## Supported Pixel Depths
 
@@ -49,12 +59,41 @@ A VS Code extension for visualizing image data during C/C++ debugging sessions. 
 
 ## Usage
 
-### Quick Start
+### Quick Start (C++)
 
 1. Start a debug session with a C/C++ program that uses OpenCV
 2. Set a breakpoint where image variables are in scope
 3. When the debugger stops, the **ImView** panel shows detected image variables
 4. Click on an image to view it in the viewer panel
+
+### Quick Start (Python)
+
+1. Start a debug session with a Python program that uses NumPy/OpenCV/PIL/PyTorch
+2. Set a breakpoint where image variables are in scope
+3. When the debugger stops, image variables appear in the **ImView** panel
+4. Click on an image or right-click and select **"View Image"** to visualize
+
+```python
+# Example Python script
+import numpy as np
+import cv2
+from PIL import Image
+import torch
+
+# NumPy array (via OpenCV)
+img_cv = cv2.imread('image.jpg')
+
+# NumPy array (random)
+img_np = np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)
+
+# PIL Image
+img_pil = Image.open('image.jpg')
+
+# PyTorch tensor (CPU only)
+img_torch = torch.rand(3, 64, 64)
+
+breakpoint()  # Set breakpoint here to visualize images
+```
 
 ### Viewing Images from Debug Variables
 
@@ -146,6 +185,7 @@ Supported `pixelType` values: `uint8`, `int8`, `uint16`, `int16`, `int32`, `floa
 - One of the following debugger extensions:
   - [C/C++ Extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode.cpptools) (for `cppdbg` and `cppvsdbg`)
   - [CodeLLDB](https://marketplace.visualstudio.com/items?itemName=vadimcn.vscode-lldb) (for `lldb`)
+  - [Python Extension](https://marketplace.visualstudio.com/items?itemName=ms-python.python) with [Debugpy](https://marketplace.visualstudio.com/items?itemName=ms-python.debugpy) (for Python debugging)
 
 ## Installation
 
@@ -173,6 +213,8 @@ npx vsce package --allow-missing-repository
 - Large images (>16384 pixels in either dimension) may cause performance issues
 - Some debugger configurations may not support `readMemory` requests
 - PNG/JPG export is not fully implemented (use binary export instead)
+- **Python**: PyTorch tensors must be on CPU (use `.cpu()` to move GPU tensors)
+- **Python**: Very large images may take longer to transfer due to base64 encoding
 
 ## Troubleshooting
 

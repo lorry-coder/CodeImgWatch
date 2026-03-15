@@ -250,12 +250,21 @@ export abstract class BaseImageParser implements IImageParser {
  */
 export function isKnownImageType(typeName: string): boolean {
     const knownPatterns = [
+        // C++ OpenCV types
         /cv::Mat\b/,
         /cv::Mat_</,
         /cv::Matx</,
         /cv::UMat\b/,
         /\bCvMat\b/,
         /\bIplImage\b/,
+        // Python image types
+        /\bndarray\b/,           // numpy.ndarray
+        /\barray\b/,             // debugpy shows numpy arrays as "array"
+        /\bImage\b/,             // PIL.Image.Image
+        /\bTensor\b/,            // torch.Tensor
+        /numpy\.ndarray/,
+        /PIL\.Image/,
+        /torch\.Tensor/,
     ];
 
     return knownPatterns.some(pattern => pattern.test(typeName));

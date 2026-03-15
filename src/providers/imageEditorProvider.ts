@@ -1,11 +1,12 @@
 import * as vscode from 'vscode';
 import { DebugSessionManager } from '../core/debugSessionManager';
-import { ImageItem, DisplayOptions, DefaultDisplayOptions } from '../types';
+import { ImageItem, ImageMetadata, DisplayOptions, DefaultDisplayOptions, ImageTypeName } from '../types';
 import {
     ExtensionToWebviewMessage,
     WebviewToExtensionMessage,
     createDisplayImageMessage,
 } from '../types/messages';
+import { chwToHwc } from '../utils/imageTransform';
 
 /**
  * Manager for image editor panels (separate tab windows)
@@ -160,10 +161,17 @@ export class ImageEditorManager implements vscode.Disposable {
                 return;
             }
 
-            const data = await this.sessionManager.readMemoryChunked(
-                item.metadata.dataAddress,
-                item.metadata.dataSize
-            );
+            // Read image data based on debugger type
+            let data: Uint8Array | undefined;
+
+            if (item.metadata.debuggerType === 'debugpy') {
+                data = await this.readPythonImageData(item.metadata);
+            } else {
+                data = await this.sessionManager.readMemoryChunked(
+                    item.metadata.dataAddress,
+                    item.metadata.dataSize
+                );
+            }
 
             if (!data) {
                 this.postMessage(panel, {
@@ -171,6 +179,20 @@ export class ImageEditorManager implements vscode.Disposable {
                     message: 'Failed to read image data from memory',
                 });
                 return;
+            }
+
+            // Handle CHW to HWC conversion for PyTorch tensors
+            if (item.metadata.dataLayout === 'CHW' && item.metadata.channels > 1) {
+                data = chwToHwc(
+                    data,
+                    item.metadata.channels,
+                    item.metadata.height,
+                    item.metadata.width,
+                    this.getBytesPerElement(item.metadata.depth)
+                );
+                // Update metadata to reflect the conversion
+                item.metadata.dataLayout = 'HWC';
+                item.metadata.stride = item.metadata.width * item.metadata.channels * this.getBytesPerElement(item.metadata.depth);
             }
 
             const base64 = this.arrayToBase64(data);
@@ -184,6 +206,45 @@ export class ImageEditorManager implements vscode.Disposable {
         } finally {
             this.postMessage(panel, { command: 'setLoading', loading: false });
         }
+    }
+
+    /**
+     * Read image data from Python debugger (debugpy)
+     */
+    private async readPythonImageData(metadata: ImageMetadata): Promise<Uint8Array | undefined> {
+        const expression = metadata.expression;
+
+        // Build the appropriate expression based on image type
+        let dataExpression: string;
+
+        if (metadata.typeName === ImageTypeName.PIL_IMAGE) {
+            // Convert PIL image to numpy array first
+            dataExpression = `__import__('numpy').array(${expression})`;
+        } else if (metadata.typeName === ImageTypeName.TORCH_TENSOR) {
+            // Convert torch tensor to numpy
+            // Need to handle CHW format and ensure contiguous
+            if (metadata.dataLayout === 'CHW' && metadata.channels > 1) {
+                // Permute CHW to HWC, then convert to numpy
+                dataExpression = `${expression}.permute(1, 2, 0).contiguous().numpy()`;
+            } else {
+                dataExpression = `${expression}.contiguous().numpy()`;
+            }
+            // Mark that we've already done the conversion
+            metadata.dataLayout = 'HWC';
+        } else {
+            // numpy array - ensure contiguous
+            dataExpression = `__import__('numpy').ascontiguousarray(${expression})`;
+        }
+
+        return this.sessionManager.readPythonArrayData(dataExpression, false);
+    }
+
+    /**
+     * Get bytes per element for a given depth
+     */
+    private getBytesPerElement(depth: number): number {
+        const sizes = [1, 1, 2, 2, 4, 4, 8, 2]; // CV_8U, CV_8S, CV_16U, CV_16S, CV_32S, CV_32F, CV_64F, CV_16F
+        return sizes[depth] ?? 1;
     }
 
     /**

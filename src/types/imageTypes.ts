@@ -3,7 +3,7 @@ import { PixelDepth, ChannelFormat } from './pixelFormats';
 /**
  * Supported debugger types
  */
-export type DebuggerType = 'cppdbg' | 'cppvsdbg' | 'lldb' | 'unknown';
+export type DebuggerType = 'cppdbg' | 'cppvsdbg' | 'lldb' | 'debugpy' | 'unknown';
 
 /**
  * Known image type names
@@ -16,6 +16,10 @@ export enum ImageTypeName {
     IPL_IMAGE = 'IplImage',
     RAW_ARRAY = 'RawArray',
     CUSTOM = 'Custom',
+    // Python image types
+    NUMPY_NDARRAY = 'numpy.ndarray',
+    PIL_IMAGE = 'PIL.Image.Image',
+    TORCH_TENSOR = 'torch.Tensor',
 }
 
 /**
@@ -60,6 +64,9 @@ export interface ImageMetadata {
 
     /** Whether data is continuous in memory */
     isContinuous?: boolean;
+
+    /** Data layout for tensor data (HWC or CHW) */
+    dataLayout?: 'HWC' | 'CHW';
 
     /** Source debugger type */
     debuggerType?: DebuggerType;

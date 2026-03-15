@@ -67,3 +67,91 @@ export function validateChannels(channels: number): boolean {
 export function validateDepth(depth: number): depth is PixelDepth {
     return depth >= 0 && depth <= 7;
 }
+
+/**
+ * Convert CHW (Channel, Height, Width) data layout to HWC (Height, Width, Channel)
+ * This is commonly needed for PyTorch tensors which use CHW format
+ *
+ * @param data - The input data in CHW format
+ * @param channels - Number of channels
+ * @param height - Image height
+ * @param width - Image width
+ * @param bytesPerElement - Bytes per pixel element (1 for uint8, 4 for float32, etc.)
+ * @returns New Uint8Array with data in HWC format
+ */
+export function chwToHwc(
+    data: Uint8Array,
+    channels: number,
+    height: number,
+    width: number,
+    bytesPerElement: number
+): Uint8Array {
+    if (channels === 1) {
+        // Single channel - no conversion needed
+        return data;
+    }
+
+    const hwcData = new Uint8Array(data.length);
+
+    for (let h = 0; h < height; h++) {
+        for (let w = 0; w < width; w++) {
+            for (let c = 0; c < channels; c++) {
+                // CHW index: c * (H * W) + h * W + w
+                const chwOffset = (c * height * width + h * width + w) * bytesPerElement;
+                // HWC index: h * (W * C) + w * C + c
+                const hwcOffset = (h * width * channels + w * channels + c) * bytesPerElement;
+
+                // Copy bytesPerElement bytes
+                for (let b = 0; b < bytesPerElement; b++) {
+                    hwcData[hwcOffset + b] = data[chwOffset + b];
+                }
+            }
+        }
+    }
+
+    return hwcData;
+}
+
+/**
+ * Convert HWC (Height, Width, Channel) data layout to CHW (Channel, Height, Width)
+ * This can be useful for exporting data back to PyTorch format
+ *
+ * @param data - The input data in HWC format
+ * @param channels - Number of channels
+ * @param height - Image height
+ * @param width - Image width
+ * @param bytesPerElement - Bytes per pixel element
+ * @returns New Uint8Array with data in CHW format
+ */
+export function hwcToChw(
+    data: Uint8Array,
+    channels: number,
+    height: number,
+    width: number,
+    bytesPerElement: number
+): Uint8Array {
+    if (channels === 1) {
+        // Single channel - no conversion needed
+        return data;
+    }
+
+    const chwData = new Uint8Array(data.length);
+
+    for (let h = 0; h < height; h++) {
+        for (let w = 0; w < width; w++) {
+            for (let c = 0; c < channels; c++) {
+                // HWC index: h * (W * C) + w * C + c
+                const hwcOffset = (h * width * channels + w * channels + c) * bytesPerElement;
+                // CHW index: c * (H * W) + h * W + w
+                const chwOffset = (c * height * width + h * width + w) * bytesPerElement;
+
+                // Copy bytesPerElement bytes
+                for (let b = 0; b < bytesPerElement; b++) {
+                    chwData[chwOffset + b] = data[hwcOffset + b];
+                }
+            }
+        }
+    }
+
+    return chwData;
+}

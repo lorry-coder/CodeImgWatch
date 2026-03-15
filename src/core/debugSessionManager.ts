@@ -187,7 +187,7 @@ export class DebugSessionManager implements vscode.Disposable {
      * Check if a debugger type is supported
      */
     public isSupportedDebugger(type: string): boolean {
-        const supportedTypes = ['cppdbg', 'cppvsdbg', 'lldb'];
+        const supportedTypes = ['cppdbg', 'cppvsdbg', 'lldb', 'debugpy'];
         return supportedTypes.includes(type);
     }
 
@@ -203,9 +203,18 @@ export class DebugSessionManager implements vscode.Disposable {
                 return 'cppvsdbg';
             case 'lldb':
                 return 'lldb';
+            case 'debugpy':
+                return 'debugpy';
             default:
                 return 'unknown';
         }
+    }
+
+    /**
+     * Check if current debugger is Python-based
+     */
+    public isPythonDebugger(): boolean {
+        return this.getDebuggerType() === 'debugpy';
     }
 
     /**
@@ -258,6 +267,7 @@ export class DebugSessionManager implements vscode.Disposable {
      */
     public async evaluate(expression: string, context: 'watch' | 'repl' | 'hover' = 'watch'): Promise<EvaluateResponse | undefined> {
         if (!this._activeSession) {
+            console.error('[ImView] evaluate: No active session');
             return undefined;
         }
 
@@ -267,18 +277,21 @@ export class DebugSessionManager implements vscode.Disposable {
         }
 
         if (this._currentFrameId === undefined) {
+            console.error('[ImView] evaluate: No frame ID available');
             return undefined;
         }
 
         try {
+            console.log(`[ImView] Evaluating (context=${context}, frameId=${this._currentFrameId}): ${expression.substring(0, 100)}...`);
             const response = await this._activeSession.customRequest('evaluate', {
                 expression,
                 frameId: this._currentFrameId,
                 context,
             });
+            console.log(`[ImView] Evaluate response: result=${response?.result?.substring(0, 100)}...`);
             return response as EvaluateResponse;
         } catch (error) {
-            console.error(`Failed to evaluate '${expression}':`, error);
+            console.error(`[ImView] Failed to evaluate '${expression.substring(0, 100)}...':`, error);
             return undefined;
         }
     }
@@ -530,6 +543,229 @@ export class DebugSessionManager implements vscode.Disposable {
         }
 
         return undefined;
+    }
+
+    /**
+     * Read memory via Python expression evaluation (for debugpy)
+     * Since debugpy doesn't support DAP readMemory, we use expression evaluation
+     * with base64 encoding to transfer binary data
+     */
+    public async readMemoryViaPython(expression: string): Promise<Uint8Array | undefined> {
+        if (!this._activeSession) {
+            return undefined;
+        }
+
+        try {
+            // Evaluate Python expression that returns base64-encoded bytes
+            // The expression should be constructed by the caller to use:
+            // import base64; base64.b64encode(arr.tobytes()).decode()
+            const pythonExpr = `__import__('base64').b64encode(${expression}.tobytes()).decode('ascii')`;
+            const result = await this.evaluate(pythonExpr, 'repl');
+
+            if (!result || !result.result) {
+                console.error(`Failed to evaluate Python expression for memory read`);
+                return undefined;
+            }
+
+            // The result is a string with quotes, e.g., "'SGVsbG8='"
+            // Remove quotes and decode base64
+            let base64Data = result.result;
+            // Remove surrounding quotes if present
+            if ((base64Data.startsWith("'") && base64Data.endsWith("'")) ||
+                (base64Data.startsWith('"') && base64Data.endsWith('"'))) {
+                base64Data = base64Data.slice(1, -1);
+            }
+
+            // Decode base64 to Uint8Array
+            const binaryString = atob(base64Data);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes;
+        } catch (error) {
+            console.error(`Failed to read memory via Python:`, error);
+            return undefined;
+        }
+    }
+
+    /**
+     * Read memory for Python arrays by ensuring data is contiguous first
+     * This handles non-contiguous numpy arrays by using np.ascontiguousarray
+     * Uses chunked reading to handle large images that exceed debugpy's output limits
+     */
+    public async readPythonArrayData(expression: string, ensureContiguous: boolean = true): Promise<Uint8Array | undefined> {
+        if (!this._activeSession) {
+            console.error('[ImView] No active session for readPythonArrayData');
+            return undefined;
+        }
+
+        try {
+            // Build the expression to get contiguous data
+            let dataExpr: string;
+            if (ensureContiguous) {
+                // Use numpy.ascontiguousarray to ensure C-contiguous layout
+                dataExpr = `__import__('numpy').ascontiguousarray(${expression})`;
+            } else {
+                dataExpr = expression;
+            }
+
+            console.log(`[ImView] Reading Python array data: ${dataExpr}`);
+
+            // First, store the array in a temporary variable and get its size
+            // This avoids re-evaluating the expression multiple times
+            const tempVarName = `_imview_temp_${Date.now()}`;
+            const storeExpr = `globals().__setitem__('${tempVarName}', ${dataExpr}.tobytes()) or len(globals()['${tempVarName}'])`;
+
+            console.log(`[ImView] Store expression: ${storeExpr}`);
+            const sizeResult = await this.evaluate(storeExpr, 'repl');
+            console.log(`[ImView] Size result:`, JSON.stringify(sizeResult));
+
+            if (!sizeResult || !sizeResult.result) {
+                console.error(`[ImView] Failed to store Python array data, result:`, sizeResult);
+                return undefined;
+            }
+
+            const totalSize = parseInt(sizeResult.result, 10);
+            if (isNaN(totalSize) || totalSize <= 0) {
+                console.error(`[ImView] Invalid array size: ${sizeResult.result}`);
+                // Clean up temp variable
+                await this.evaluate(`globals().pop('${tempVarName}', None)`, 'repl');
+                return undefined;
+            }
+
+            console.log(`[ImView] Total size to read: ${totalSize} bytes`);
+
+            // Read data in chunks to avoid debugpy output limits
+            // debugpy limits evaluate result to ~64KB, base64 increases size by ~33%
+            // So we can read about 48KB of raw data per chunk (48KB * 1.33 ≈ 64KB)
+            const chunkSize = 48 * 1024; // 48KB chunks (will be ~64KB in base64)
+            const result = new Uint8Array(totalSize);
+            let offset = 0;
+
+            while (offset < totalSize) {
+                const remaining = totalSize - offset;
+                const readSize = Math.min(chunkSize, remaining);
+
+                // Read chunk as base64
+                const chunkExpr = `__import__('base64').b64encode(globals()['${tempVarName}'][${offset}:${offset + readSize}]).decode('ascii')`;
+                const chunkResult = await this.evaluate(chunkExpr, 'repl');
+
+                if (!chunkResult || !chunkResult.result) {
+                    console.error(`[ImView] Failed to read chunk at offset ${offset}, result:`, chunkResult);
+                    // Clean up temp variable
+                    await this.evaluate(`globals().pop('${tempVarName}', None)`, 'repl');
+                    return undefined;
+                }
+
+                // Parse result - remove quotes and clean up
+                let base64Data = chunkResult.result;
+
+                // Remove surrounding quotes if present
+                if ((base64Data.startsWith("'") && base64Data.endsWith("'")) ||
+                    (base64Data.startsWith('"') && base64Data.endsWith('"'))) {
+                    base64Data = base64Data.slice(1, -1);
+                }
+
+                // Remove any newlines, spaces, or escape sequences that debugpy might add
+                base64Data = base64Data.replace(/[\r\n\s\\]/g, '');
+
+                // Validate base64 string
+                if (!/^[A-Za-z0-9+/]*={0,2}$/.test(base64Data)) {
+                    console.error(`[ImView] Invalid base64 string at offset ${offset}, length: ${base64Data.length}`);
+                    console.error(`[ImView] First 100 chars: ${base64Data.substring(0, 100)}`);
+                    console.error(`[ImView] Last 100 chars: ${base64Data.substring(base64Data.length - 100)}`);
+                    // Clean up temp variable
+                    await this.evaluate(`globals().pop('${tempVarName}', None)`, 'repl');
+                    return undefined;
+                }
+
+                // Decode base64 chunk
+                try {
+                    const binaryString = atob(base64Data);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        result[offset + i] = binaryString.charCodeAt(i);
+                    }
+                    offset += binaryString.length;
+                    console.log(`[ImView] Read chunk: ${offset}/${totalSize} bytes`);
+                } catch (decodeError) {
+                    console.error(`[ImView] Failed to decode base64 at offset ${offset}:`, decodeError);
+                    console.error(`[ImView] Base64 length: ${base64Data.length}`);
+                    // Clean up temp variable
+                    await this.evaluate(`globals().pop('${tempVarName}', None)`, 'repl');
+                    return undefined;
+                }
+            }
+
+            // Clean up temp variable
+            await this.evaluate(`globals().pop('${tempVarName}', None)`, 'repl');
+
+            console.log(`[ImView] Successfully read ${result.length} bytes`);
+            return result;
+        } catch (error) {
+            console.error(`[ImView] Failed to read Python array data:`, error);
+            return undefined;
+        }
+    }
+
+    /**
+     * Evaluate a Python expression and get a numeric result
+     */
+    public async evaluatePythonAsNumber(expression: string): Promise<number | undefined> {
+        const result = await this.evaluate(expression, 'repl');
+        if (!result || !result.result) {
+            return undefined;
+        }
+
+        // Parse the result as number
+        const value = parseFloat(result.result);
+        return isNaN(value) ? undefined : value;
+    }
+
+    /**
+     * Evaluate a Python expression and get a string result
+     */
+    public async evaluatePythonAsString(expression: string): Promise<string | undefined> {
+        const result = await this.evaluate(expression, 'repl');
+        if (!result || !result.result) {
+            return undefined;
+        }
+
+        // Remove surrounding quotes
+        let str = result.result;
+        if ((str.startsWith("'") && str.endsWith("'")) ||
+            (str.startsWith('"') && str.endsWith('"'))) {
+            str = str.slice(1, -1);
+        }
+        return str;
+    }
+
+    /**
+     * Evaluate a Python expression and get a tuple/list as number array
+     */
+    public async evaluatePythonAsTuple(expression: string): Promise<number[] | undefined> {
+        const result = await this.evaluate(expression, 'repl');
+        if (!result || !result.result) {
+            return undefined;
+        }
+
+        try {
+            // Parse tuple/list format like (100, 200, 3) or [100, 200, 3]
+            const str = result.result.trim();
+            const match = str.match(/[\(\[](.*)[\)\]]/);
+            if (!match) {
+                return undefined;
+            }
+
+            const values = match[1].split(',').map(v => {
+                const num = parseFloat(v.trim());
+                return isNaN(num) ? 0 : num;
+            });
+
+            return values;
+        } catch {
+            return undefined;
+        }
     }
 
     public dispose(): void {
