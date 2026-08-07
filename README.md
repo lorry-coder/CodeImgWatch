@@ -16,7 +16,7 @@ A VS Code extension for visualizing image data during C/C++ and Python debugging
 - **Dual View Modes**: Sidebar panel and separate editor tab modes
 - **Context Menu Integration**: Right-click on variables in the debug panel to view or add to watch list
 - **Watch Expressions**: Add custom expressions to watch list
-- **Export**: Save images to raw binary format
+- **Export**: Save the rendered image as PNG/JPEG or export its display buffer as raw binary
 
 ## Supported Platforms
 
@@ -126,6 +126,9 @@ Add custom expressions to monitor:
 | Actual size | Click "1:1" button |
 | View channel | Select from dropdown |
 | Normalize | Toggle checkbox |
+| Export | Click "Export" or use the image-list context menu |
+
+PNG/JPEG exports contain the rendered pixels after normalization, colormap, channel selection, and alpha handling. Zoom, grids, and inspector overlays are not included; JPEG composites transparent pixels onto white.
 
 ### Image Operators
 
@@ -158,6 +161,7 @@ Operators can be nested: `@abs(@diff(img1, img2))`
 | `imview.maxImageSize` | `4096` | Maximum image dimension |
 | `imview.maxImageBytes` | `268435456` | Maximum debugger transfer size (256 MiB) |
 | `imview.numpyChannelOrder` | `bgr` | Treat 3/4-channel NumPy arrays as OpenCV BGR/BGRA or RGB/RGBA |
+| `imview.jpegQuality` | `0.92` | JPEG export quality from 0.1 to 1.0 |
 | `imview.showPixelGrid` | `true` | Show pixel grid when zoomed in |
 | `imview.pixelGridZoomThreshold` | `8` | Minimum zoom to show pixel grid |
 | `imview.autoNormalize` | `true` | Auto-normalize values for display |
@@ -218,7 +222,6 @@ npm run package:vsix
 
 - Image dimensions and transfer size are bounded by `imview.maxImageSize` and `imview.maxImageBytes`
 - Some debugger configurations may not support `readMemory` requests
-- PNG/JPG export is not fully implemented (use binary export instead)
 - **Python**: Accelerator-backed PyTorch tensors are copied to CPU and may pause longer for large tensors
 - **Python**: Very large images may take longer to transfer due to base64 encoding
 

@@ -1,5 +1,8 @@
 import { ImageMetadata, DisplayOptions, ViewState } from './imageTypes';
 
+export type ImageExportFormat = 'png' | 'jpg' | 'bin';
+export type EncodedImageExportFormat = Exclude<ImageExportFormat, 'bin'>;
+
 /**
  * Base message interface
  */
@@ -79,6 +82,16 @@ export interface SetLoadingMessage extends BaseMessage {
     loading: boolean;
 }
 
+/** Request that the webview encode its rendered canvas. */
+export interface RequestImageExportMessage extends BaseMessage {
+    command: 'requestImageExport';
+    requestId: string;
+    imageId: string;
+    format: EncodedImageExportFormat;
+    jpegQuality: number;
+    maxBytes: number;
+}
+
 /**
  * Union of all extension -> webview messages
  */
@@ -88,7 +101,8 @@ export type ExtensionToWebviewMessage =
     | ShowErrorMessage
     | UpdateOptionsMessage
     | SyncViewMessage
-    | SetLoadingMessage;
+    | SetLoadingMessage
+    | RequestImageExportMessage;
 
 // ============================================
 // Webview -> Extension Messages
@@ -116,7 +130,18 @@ export interface CopyPixelMessage extends BaseMessage {
  */
 export interface ExportImageMessage extends BaseMessage {
     command: 'exportImage';
-    format: 'png' | 'jpg' | 'bin';
+    format?: ImageExportFormat;
+    imageId?: string;
+    name?: string;
+}
+
+/** Encoded canvas bytes returned by the webview. */
+export interface ExportImageDataMessage extends BaseMessage {
+    command: 'exportImageData';
+    requestId: string;
+    format: EncodedImageExportFormat;
+    data?: string;
+    error?: string;
 }
 
 /**
@@ -171,6 +196,7 @@ export type WebviewToExtensionMessage =
     | QueryPixelMessage
     | CopyPixelMessage
     | ExportImageMessage
+    | ExportImageDataMessage
     | ViewStateChangedMessage
     | RefreshRequestMessage
     | OpenInEditorMessage

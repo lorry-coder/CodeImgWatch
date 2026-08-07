@@ -66,13 +66,23 @@ interface SetLoadingMessage {
     loading: boolean;
 }
 
+interface RequestImageExportMessage {
+    command: 'requestImageExport';
+    requestId: string;
+    imageId: string;
+    format: 'png' | 'jpg';
+    jpegQuality: number;
+    maxBytes: number;
+}
+
 type ExtensionMessage =
     | DisplayImageMessage
     | ClearImageMessage
     | ShowErrorMessage
     | UpdateOptionsMessage
     | SyncViewMessage
-    | SetLoadingMessage;
+    | SetLoadingMessage
+    | RequestImageExportMessage;
 
 /**
  * Main viewer application
@@ -199,7 +209,11 @@ class ImageViewer {
         // Export button (if exists)
         const btnExport = document.getElementById('btn-export');
         btnExport?.addEventListener('click', () => {
-            vscode.postMessage({ command: 'exportImage', format: 'png' });
+            vscode.postMessage({
+                command: 'exportImage',
+                imageId: this.currentImageInfo?.id,
+                name: this.currentImageInfo?.name,
+            });
         });
 
         // Keyboard shortcuts
@@ -274,7 +288,97 @@ class ImageViewer {
             case 'setLoading':
                 this.setLoading(message.loading);
                 break;
+
+            case 'requestImageExport':
+                void this.exportRenderedImage(message);
+                break;
         }
+    }
+
+    /** Encode exactly what is currently rendered, excluding zoom and inspector overlays. */
+    private async exportRenderedImage(message: RequestImageExportMessage): Promise<void> {
+        try {
+            if (!this.currentImageInfo || this.currentImageId !== message.imageId) {
+                throw new Error('The requested image is not currently rendered');
+            }
+            if (!Number.isSafeInteger(message.maxBytes) || message.maxBytes <= 0) {
+                throw new Error('The image export size limit is invalid');
+            }
+            if (this.canvas.width === 0 || this.canvas.height === 0) {
+                throw new Error('The rendered image is empty');
+            }
+
+            const mimeType = message.format === 'png' ? 'image/png' : 'image/jpeg';
+            let exportCanvas = this.canvas;
+
+            // JPEG has no alpha channel. Composite onto white explicitly instead of relying
+            // on browser-specific transparent-pixel behavior.
+            if (message.format === 'jpg') {
+                const flattened = document.createElement('canvas');
+                flattened.width = this.canvas.width;
+                flattened.height = this.canvas.height;
+                const context = flattened.getContext('2d');
+                if (!context) {
+                    throw new Error('Failed to create the JPEG export canvas');
+                }
+                context.fillStyle = '#ffffff';
+                context.fillRect(0, 0, flattened.width, flattened.height);
+                context.drawImage(this.canvas, 0, 0);
+                exportCanvas = flattened;
+            }
+
+            const blob = await new Promise<Blob>((resolve, reject) => {
+                exportCanvas.toBlob(
+                    result => result ? resolve(result) : reject(new Error(`Browser failed to encode ${mimeType}`)),
+                    mimeType,
+                    message.format === 'jpg' ? message.jpegQuality : undefined
+                );
+            });
+            if (blob.type && blob.type.toLowerCase() !== mimeType) {
+                throw new Error(`Browser encoded ${blob.type} instead of ${mimeType}`);
+            }
+            if (blob.size === 0) {
+                throw new Error(`Browser returned an empty ${mimeType} image`);
+            }
+            if (blob.size > message.maxBytes) {
+                throw new Error(`Encoded image exceeds the ${message.maxBytes}-byte export limit`);
+            }
+            const data = await this.blobToBase64(blob);
+            vscode.postMessage({
+                command: 'exportImageData',
+                requestId: message.requestId,
+                format: message.format,
+                data,
+            });
+        } catch (error) {
+            vscode.postMessage({
+                command: 'exportImageData',
+                requestId: message.requestId,
+                format: message.format,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+
+    private blobToBase64(blob: Blob): Promise<string> {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(reader.error ?? new Error('Failed to read encoded image'));
+            reader.onload = () => {
+                const result = reader.result;
+                if (typeof result !== 'string') {
+                    reject(new Error('Encoded image was not returned as a data URL'));
+                    return;
+                }
+                const separator = result.indexOf(',');
+                if (separator < 0) {
+                    reject(new Error('Encoded image data URL is malformed'));
+                    return;
+                }
+                resolve(result.slice(separator + 1));
+            };
+            reader.readAsDataURL(blob);
+        });
     }
 
     /**

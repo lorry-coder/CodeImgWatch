@@ -1,9 +1,15 @@
 import * as vscode from 'vscode';
 import { DebugSessionManager } from '../core/debugSessionManager';
 import { readImageDataForDisplay } from '../core/imageDataReader';
+import {
+    formatExportLocation,
+    promptForImageExport,
+    WebviewImageExporter,
+} from '../core/imageExporter';
 import { ImageItem, DisplayOptions, DefaultDisplayOptions } from '../types';
 import {
     ExtensionToWebviewMessage,
+    ImageExportFormat,
     WebviewToExtensionMessage,
     createDisplayImageMessage,
 } from '../types/messages';
@@ -18,7 +24,17 @@ export class ImageViewerProvider implements vscode.WebviewViewProvider, vscode.D
     private view?: vscode.WebviewView;
     private sessionManager: DebugSessionManager;
     private currentImage?: ImageItem;
+    private displayedImage?: ImageItem;
     private displayOptions: DisplayOptions;
+    private readonly imageExporter = new WebviewImageExporter();
+    private webviewReady = false;
+    private readonly webviewReadyWaiters = new Set<(error?: Error) => void>();
+    private displayInFlight?: {
+        item: ImageItem;
+        view: vscode.WebviewView;
+        promise: Promise<void>;
+    };
+    private displayGeneration = 0;
 
     // Event for view state changes (for syncing)
     private _onDidChangeViewState = new vscode.EventEmitter<{ zoom: number; panX: number; panY: number }>();
@@ -54,6 +70,7 @@ export class ImageViewerProvider implements vscode.WebviewViewProvider, vscode.D
 
     resolveWebviewView(webviewView: vscode.WebviewView): void {
         this.view = webviewView;
+        this.webviewReady = false;
 
         webviewView.webview.options = {
             enableScripts: true,
@@ -75,6 +92,18 @@ export class ImageViewerProvider implements vscode.WebviewViewProvider, vscode.D
                 this.displayImage(this.currentImage);
             }
         });
+
+        webviewView.onDidDispose(() => {
+            if (this.view === webviewView) {
+                this.view = undefined;
+                this.webviewReady = false;
+                this.displayedImage = undefined;
+                this.displayInFlight = undefined;
+                this.displayGeneration++;
+                this.imageExporter.cancelPending(new Error('Image Viewer was closed'));
+                this.rejectWebviewReadyWaiters(new Error('Image Viewer was closed'));
+            }
+        });
     }
 
     /**
@@ -83,12 +112,13 @@ export class ImageViewerProvider implements vscode.WebviewViewProvider, vscode.D
     private async handleWebviewMessage(message: WebviewToExtensionMessage): Promise<void> {
         switch (message.command) {
             case 'ready':
-                // Webview is ready, send current image if any
+                // Mark startup separately from debugger memory reads. Export callers can
+                // now share the same in-flight display instead of timing out or rereading.
+                this.postMessage({ command: 'updateOptions', options: this.displayOptions });
+                this.markWebviewReady();
                 if (this.currentImage) {
                     await this.displayImage(this.currentImage);
                 }
-                // Send display options
-                this.postMessage({ command: 'updateOptions', options: this.displayOptions });
                 break;
 
             case 'viewStateChanged':
@@ -101,7 +131,21 @@ export class ImageViewerProvider implements vscode.WebviewViewProvider, vscode.D
                 break;
 
             case 'exportImage':
-                await this.exportCurrentImage(message.format);
+                {
+                    const displayedImage = message.imageId &&
+                        this.displayedImage?.metadata?.id === message.imageId
+                        ? this.displayedImage
+                        : !message.imageId ? this.currentImage : undefined;
+                    if (displayedImage) {
+                        await this.exportImage(displayedImage, message.format, message.name);
+                    } else {
+                        vscode.window.showWarningMessage('The displayed image changed; try exporting again');
+                    }
+                }
+                break;
+
+            case 'exportImageData':
+                this.imageExporter.handleResponse(message);
                 break;
 
             case 'refresh':
@@ -128,16 +172,41 @@ export class ImageViewerProvider implements vscode.WebviewViewProvider, vscode.D
     async displayImage(item: ImageItem): Promise<void> {
         this.currentImage = item;
 
-        if (!this.view) {
+        const view = this.view;
+        if (!view || !this.webviewReady) {
             return;
         }
 
+        if (this.displayInFlight?.item === item && this.displayInFlight.view === view) {
+            return this.displayInFlight.promise;
+        }
+
+        const generation = ++this.displayGeneration;
+        const promise = this.displayImageInView(view, item, generation).finally(() => {
+            if (this.displayInFlight?.promise === promise) {
+                this.displayInFlight = undefined;
+            }
+        });
+        this.displayInFlight = { item, view, promise };
+        return promise;
+    }
+
+    private async displayImageInView(
+        view: vscode.WebviewView,
+        item: ImageItem,
+        generation: number
+    ): Promise<void> {
+        const postMessage = (message: ExtensionToWebviewMessage): Thenable<boolean> =>
+            view.webview.postMessage(message);
+        const isCurrent = (): boolean =>
+            this.view === view && this.displayGeneration === generation;
+
         // Show loading state
-        this.postMessage({ command: 'setLoading', loading: true });
+        postMessage({ command: 'setLoading', loading: true });
 
         try {
             if (!item.metadata) {
-                this.postMessage({
+                postMessage({
                     command: 'showError',
                     message: item.error ?? 'No image metadata available',
                 });
@@ -146,10 +215,15 @@ export class ImageViewerProvider implements vscode.WebviewViewProvider, vscode.D
 
             const image = await readImageDataForDisplay(this.sessionManager, item.metadata);
             if (!image) {
-                this.postMessage({
-                    command: 'showError',
-                    message: 'Failed to read image data from memory',
-                });
+                if (isCurrent()) {
+                    postMessage({
+                        command: 'showError',
+                        message: 'Failed to read image data from memory',
+                    });
+                }
+                return;
+            }
+            if (!isCurrent()) {
                 return;
             }
 
@@ -158,14 +232,20 @@ export class ImageViewerProvider implements vscode.WebviewViewProvider, vscode.D
 
             // Send to webview
             const message = createDisplayImageMessage(image.metadata, base64);
-            this.postMessage(message);
+            if (await postMessage(message) && isCurrent()) {
+                this.displayedImage = item;
+            }
         } catch (error) {
-            this.postMessage({
-                command: 'showError',
-                message: `Error loading image: ${error}`,
-            });
+            if (isCurrent()) {
+                postMessage({
+                    command: 'showError',
+                    message: `Error loading image: ${error}`,
+                });
+            }
         } finally {
-            this.postMessage({ command: 'setLoading', loading: false });
+            if (isCurrent()) {
+                postMessage({ command: 'setLoading', loading: false });
+            }
         }
     }
 
@@ -174,6 +254,9 @@ export class ImageViewerProvider implements vscode.WebviewViewProvider, vscode.D
      */
     clearDisplay(): void {
         this.currentImage = undefined;
+        this.displayedImage = undefined;
+        this.displayInFlight = undefined;
+        this.displayGeneration++;
         this.postMessage({ command: 'clearImage' });
     }
 
@@ -195,56 +278,107 @@ export class ImageViewerProvider implements vscode.WebviewViewProvider, vscode.D
     /**
      * Export current image to file
      */
-    private async exportCurrentImage(format: 'png' | 'jpg' | 'bin'): Promise<void> {
-        if (!this.currentImage?.metadata) {
+    async exportCurrentImage(): Promise<void> {
+        const item = this.displayedImage ?? this.currentImage;
+        if (!item?.metadata) {
+            vscode.window.showWarningMessage('No image to export');
+            return;
+        }
+        await this.exportImage(item);
+    }
+
+    async exportImage(
+        item: ImageItem,
+        requestedFormat?: ImageExportFormat,
+        suggestedName?: string
+    ): Promise<void> {
+        if (!item.metadata) {
             vscode.window.showErrorMessage('No image to export');
             return;
         }
 
-        const meta = this.currentImage.metadata;
-        const defaultName = `${meta.name.replace(/[^a-zA-Z0-9]/g, '_')}.${format}`;
-
-        const uri = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.file(defaultName),
-            filters:
-                format === 'bin'
-                    ? { 'Binary': ['bin'] }
-                    : format === 'png'
-                        ? { 'PNG Image': ['png'] }
-                        : { 'JPEG Image': ['jpg', 'jpeg'] },
-        });
-
-        if (!uri) {
+        const target = await promptForImageExport(suggestedName ?? item.metadata.name, requestedFormat);
+        if (!target) {
             return;
         }
 
         try {
-            const image = await readImageDataForDisplay(this.sessionManager, meta);
-            if (!image) {
-                throw new Error('Failed to read image data');
-            }
-
-            if (format === 'bin') {
-                // Write raw binary
-                await vscode.workspace.fs.writeFile(uri, image.data);
+            let data: Uint8Array;
+            if (target.format === 'bin') {
+                const image = await readImageDataForDisplay(this.sessionManager, item.metadata);
+                if (!image) {
+                    throw new Error('Failed to read image data');
+                }
+                data = image.data;
             } else {
-                // For PNG/JPG, the webview will handle the conversion
-                // This is a simplified implementation - full version would use canvas in webview
-                vscode.window.showWarningMessage('PNG/JPG export requires webview rendering (not yet implemented)');
-                return;
+                const encodedFormat = target.format;
+                this.currentImage = item;
+                await vscode.commands.executeCommand('imview.imageViewer.focus');
+                await this.waitForWebviewReady();
+                if (this.displayedImage !== item || this.displayInFlight) {
+                    await this.displayImage(item);
+                }
+
+                const quality = vscode.workspace.getConfiguration('imview').get('jpegQuality', 0.92);
+                data = await vscode.window.withProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title: `Encoding ${encodedFormat === 'png' ? 'PNG' : 'JPEG'} image`,
+                        cancellable: false,
+                    },
+                    () => this.imageExporter.request(
+                        message => this.postMessage(message),
+                        item.metadata!.id,
+                        encodedFormat,
+                        quality
+                    )
+                );
             }
 
-            vscode.window.showInformationMessage(`Image exported to ${uri.fsPath}`);
+            await vscode.workspace.fs.writeFile(target.uri, data);
+            vscode.window.showInformationMessage(`Image exported to ${formatExportLocation(target.uri)}`);
         } catch (error) {
             vscode.window.showErrorMessage(`Failed to export image: ${error}`);
+        }
+    }
+
+    private waitForWebviewReady(): Promise<void> {
+        if (this.webviewReady && this.view) {
+            return Promise.resolve();
+        }
+
+        return new Promise((resolve, reject) => {
+            const waiter = (error?: Error): void => {
+                clearTimeout(timer);
+                this.webviewReadyWaiters.delete(waiter);
+                error ? reject(error) : resolve();
+            };
+            const timer = setTimeout(
+                () => waiter(new Error('Image Viewer did not become ready for export')),
+                10_000
+            );
+            this.webviewReadyWaiters.add(waiter);
+        });
+    }
+
+    private markWebviewReady(): void {
+        this.webviewReady = true;
+        for (const waiter of [...this.webviewReadyWaiters]) {
+            waiter();
+        }
+    }
+
+    private rejectWebviewReadyWaiters(error: Error): void {
+        for (const waiter of [...this.webviewReadyWaiters]) {
+            waiter(error);
         }
     }
 
     /**
      * Post a message to the webview
      */
-    private postMessage(message: ExtensionToWebviewMessage): void {
-        this.view?.webview.postMessage(message);
+    private postMessage(message: ExtensionToWebviewMessage): Thenable<boolean> {
+        return this.view?.webview.postMessage(message) ?? Promise.resolve(false);
     }
 
     /**
@@ -296,6 +430,7 @@ export class ImageViewerProvider implements vscode.WebviewViewProvider, vscode.D
             </div>
             <div class="toolbar-group">
                 <label><input type="checkbox" id="auto-normalize" checked> Normalize</label>
+                <button id="btn-export" title="Export PNG, JPEG, or raw data">Export</button>
             </div>
         </div>
         <div id="canvas-container">
@@ -321,6 +456,8 @@ export class ImageViewerProvider implements vscode.WebviewViewProvider, vscode.D
     }
 
     dispose(): void {
+        this.imageExporter.dispose();
+        this.rejectWebviewReadyWaiters(new Error('Image Viewer was disposed'));
         for (const disposable of this.disposables) {
             disposable.dispose();
         }

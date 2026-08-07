@@ -141,7 +141,7 @@
         },
         {
           "command": "imview.exportImage",
-          "when": "view == imview.imageList && viewItem == imageItem",
+          "when": "view == imview.imageList && (viewItem == imageItem || viewItem == watchItem)",
           "group": "1_actions"
         },
         {
@@ -234,6 +234,13 @@
             "RGB/RGBA order used by many other Python image libraries"
           ],
           "description": "Default channel order for three- and four-channel NumPy arrays"
+        },
+        "imview.jpegQuality": {
+          "type": "number",
+          "default": 0.92,
+          "minimum": 0.1,
+          "maximum": 1,
+          "description": "JPEG export quality from 0.1 to 1.0"
         },
         "imview.thumbnailSize": {
           "type": "number",

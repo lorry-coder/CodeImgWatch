@@ -264,7 +264,7 @@ breakpoint()  # 或者在此行点击设置断点
 
 ```
 ┌─────────────────────────────────────────┐
-│ [Fit] [1:1] 100%  │ All Channels ▼│ ☑ Normalize │
+│ [Fit] [1:1] 100% │ All Channels ▼ │ ☑ Normalize [Export] │
 ├─────────────────────────────────────────┤
 │                                         │
 │         ┌─────────────────┐             │
@@ -286,6 +286,7 @@ breakpoint()  # 或者在此行点击设置断点
 | 缩放显示 | 当前缩放百分比 |
 | 通道选择 | All/Red/Green/Blue/Alpha |
 | Normalize | 自动归一化显示 |
+| Export | 导出 PNG、JPEG 或显示缓冲 |
 
 **状态栏信息：**
 - 图像名称和尺寸
@@ -480,19 +481,14 @@ obj.getImage()
 
 | 格式 | 扩展名 | 说明 |
 |------|--------|------|
-| PNG | `.png` | 无损压缩（需通过查看器） |
-| JPEG | `.jpg` | 有损压缩（需通过查看器） |
-| Binary | `.bin` | 原始二进制数据 |
+| PNG | `.png` | 无损导出当前渲染结果，保留 Alpha |
+| JPEG | `.jpg` / `.jpeg` | 有损导出当前渲染结果，透明区域合成为白色 |
+| Binary | `.bin` | 导出送入查看器的像素缓冲，不进行图像编码 |
+
+PNG/JPEG 会包含当前的归一化、色图、通道选择和 Alpha 处理结果，但不包含缩放、网格或像素检查覆盖层。JPEG 质量由 `imview.jpegQuality` 控制。
 
 **Binary 格式说明：**
-导出的 `.bin` 文件包含原始像素数据，可以用以下方式读取：
-
-```cpp
-// 读取导出的二进制文件
-std::ifstream file("image.bin", std::ios::binary);
-std::vector<uchar> data(width * height * channels);
-file.read(reinterpret_cast<char*>(data.data()), data.size());
-```
+`.bin` 文件保留 `depth`、`channels` 和 `stride` 对应的字节布局。非连续 ROI 可能包含行间 padding；PyTorch CHW 数据会先转换为查看器使用的 HWC 布局。
 
 ### 5.8 A/B 对比功能
 
@@ -669,6 +665,7 @@ cv::Vec4b pixel;
 | `imview.maxImageSize` | `4096` | 最大支持的图像尺寸 |
 | `imview.maxImageBytes` | `268435456` | 单张图像最大调试器传输字节数 |
 | `imview.numpyChannelOrder` | `"bgr"` | NumPy 三/四通道数组的默认通道顺序 |
+| `imview.jpegQuality` | `0.92` | JPEG 导出质量（0.1–1.0） |
 | `imview.thumbnailSize` | `64` | 缩略图大小 |
 | `imview.autoNormalize` | `true` | 自动归一化非 8-bit 图像 |
 | `imview.showPixelGrid` | `true` | 高缩放时显示像素网格 |
@@ -684,6 +681,7 @@ cv::Vec4b pixel;
     "imview.maxImageSize": 8192,
     "imview.maxImageBytes": 268435456,
     "imview.numpyChannelOrder": "bgr",
+    "imview.jpegQuality": 0.92,
     "imview.showPixelGrid": true,
     "imview.pixelGridZoomThreshold": 10,
     "imview.customTypes": []

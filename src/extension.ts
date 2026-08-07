@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import { DebugSessionManager } from './core/debugSessionManager';
-import { readImageDataForDisplay } from './core/imageDataReader';
 import { registerBuiltInParsers, ImageParserRegistry, isKnownImageType, normalizeTypeName } from './parsers';
 import { ImageListProvider, ImageTreeItem } from './providers/imageListProvider';
 import { ImageViewerProvider } from './providers/imageViewerProvider';
@@ -192,58 +191,23 @@ function registerCommands(context: vscode.ExtensionContext): void {
 
     // Export image
     context.subscriptions.push(
-        vscode.commands.registerCommand('imview.exportImage', async (treeItem?: ImageTreeItem) => {
-            const item = treeItem?.imageItem;
-            if (!item?.metadata) {
-                vscode.window.showWarningMessage('No image to export');
-                return;
-            }
-
-            const format = await vscode.window.showQuickPick(
-                [
-                    { label: 'PNG', value: 'png' },
-                    { label: 'JPEG', value: 'jpg' },
-                    { label: 'Raw Binary', value: 'bin' },
-                ],
-                { placeHolder: 'Select export format' }
-            );
-
-            if (!format) {
-                return;
-            }
-
-            const defaultName = `${item.metadata.name.replace(/[^a-zA-Z0-9]/g, '_')}.${format.value}`;
-            const uri = await vscode.window.showSaveDialog({
-                defaultUri: vscode.Uri.file(defaultName),
-                filters: {
-                    [format.label]: [format.value],
-                },
-            });
-
-            if (!uri) {
-                return;
-            }
-
-            try {
-                const image = await readImageDataForDisplay(sessionManager, item.metadata);
-
-                if (!image) {
-                    throw new Error('Failed to read image data');
-                }
-
-                if (format.value === 'bin') {
-                    await vscode.workspace.fs.writeFile(uri, image.data);
-                    vscode.window.showInformationMessage(`Image exported to ${uri.fsPath}`);
+        vscode.commands.registerCommand(
+            'imview.exportImage',
+            async (itemOrTreeItem?: ImageItem | ImageTreeItem) => {
+                const item = itemOrTreeItem instanceof ImageTreeItem
+                    ? itemOrTreeItem.imageItem
+                    : itemOrTreeItem;
+                if (item?.metadata) {
+                    await imageViewerProvider.exportImage(item);
+                } else if (itemOrTreeItem === undefined) {
+                    await imageViewerProvider.exportCurrentImage();
                 } else {
-                    // PNG/JPG export would need canvas rendering
-                    vscode.window.showWarningMessage(
-                        'PNG/JPG export is not yet fully implemented. Use "Open in Editor" and export from there.'
-                    );
+                    vscode.window.showWarningMessage(item?.error
+                        ? `Cannot export image: ${item.error}`
+                        : 'No image to export');
                 }
-            } catch (error) {
-                vscode.window.showErrorMessage(`Export failed: ${error}`);
             }
-        })
+        )
     );
 
     // Copy pixel value

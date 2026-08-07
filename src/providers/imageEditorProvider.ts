@@ -1,9 +1,15 @@
 import * as vscode from 'vscode';
 import { DebugSessionManager } from '../core/debugSessionManager';
 import { readImageDataForDisplay } from '../core/imageDataReader';
+import {
+    formatExportLocation,
+    promptForImageExport,
+    WebviewImageExporter,
+} from '../core/imageExporter';
 import { ImageItem, DisplayOptions, DefaultDisplayOptions } from '../types';
 import {
     ExtensionToWebviewMessage,
+    ImageExportFormat,
     WebviewToExtensionMessage,
     createDisplayImageMessage,
 } from '../types/messages';
@@ -15,6 +21,8 @@ export class ImageEditorManager implements vscode.Disposable {
     private disposables: vscode.Disposable[] = [];
     private panels: Map<string, vscode.WebviewPanel> = new Map();
     private panelItems: Map<string, ImageItem> = new Map();
+    private displayedPanelItems: Map<vscode.WebviewPanel, ImageItem> = new Map();
+    private panelExporters: Map<vscode.WebviewPanel, WebviewImageExporter> = new Map();
     private sessionManager: DebugSessionManager;
     private displayOptions: DisplayOptions;
 
@@ -89,11 +97,15 @@ export class ImageEditorManager implements vscode.Disposable {
 
         // Store panel
         this.panels.set(item.id, panel);
+        this.panelExporters.set(panel, new WebviewImageExporter());
 
         // Handle panel disposal
         panel.onDidDispose(() => {
             this.panels.delete(item.id);
             this.panelItems.delete(item.id);
+            this.displayedPanelItems.delete(panel);
+            this.panelExporters.get(panel)?.dispose();
+            this.panelExporters.delete(panel);
         });
 
         // Handle messages from webview
@@ -132,9 +144,21 @@ export class ImageEditorManager implements vscode.Disposable {
                 break;
 
             case 'exportImage':
-                if (item) {
-                    await this.exportImage(item, message.format);
+                {
+                    const panelItem = this.displayedPanelItems.get(panel);
+                    const displayedItem = message.imageId && panelItem?.metadata?.id === message.imageId
+                        ? panelItem
+                        : !message.imageId ? panelItem ?? item : undefined;
+                    if (displayedItem) {
+                        await this.exportImage(panel, displayedItem, message.format, message.name);
+                    } else {
+                        vscode.window.showWarningMessage('The displayed image changed; try exporting again');
+                    }
                 }
+                break;
+
+            case 'exportImageData':
+                this.panelExporters.get(panel)?.handleResponse(message);
                 break;
 
             case 'refresh':
@@ -183,7 +207,9 @@ export class ImageEditorManager implements vscode.Disposable {
 
             const base64 = this.arrayToBase64(image.data);
             const message = createDisplayImageMessage(image.metadata, base64);
-            this.postMessage(panel, message);
+            if (await this.postMessage(panel, message) && this.panelExporters.has(panel)) {
+                this.displayedPanelItems.set(panel, item);
+            }
         } catch (error) {
             this.postMessage(panel, {
                 command: 'showError',
@@ -217,41 +243,55 @@ export class ImageEditorManager implements vscode.Disposable {
     /**
      * Export image to file
      */
-    private async exportImage(item: ImageItem, format: 'png' | 'jpg' | 'bin'): Promise<void> {
+    private async exportImage(
+        panel: vscode.WebviewPanel,
+        item: ImageItem,
+        requestedFormat?: ImageExportFormat,
+        suggestedName?: string
+    ): Promise<void> {
         if (!item.metadata) {
             vscode.window.showErrorMessage('No image metadata');
             return;
         }
 
         const meta = item.metadata;
-        const defaultName = `${meta.name.replace(/[^a-zA-Z0-9]/g, '_')}.${format}`;
-
-        const uri = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.file(defaultName),
-            filters:
-                format === 'bin'
-                    ? { 'Binary': ['bin'] }
-                    : format === 'png'
-                        ? { 'PNG Image': ['png'] }
-                        : { 'JPEG Image': ['jpg', 'jpeg'] },
-        });
-
-        if (!uri) {
+        const target = await promptForImageExport(suggestedName ?? meta.name, requestedFormat);
+        if (!target) {
             return;
         }
 
         try {
-            const image = await readImageDataForDisplay(this.sessionManager, meta);
-            if (!image) {
-                throw new Error('Failed to read image data');
+            let data: Uint8Array;
+            if (target.format === 'bin') {
+                const image = await readImageDataForDisplay(this.sessionManager, meta);
+                if (!image) {
+                    throw new Error('Failed to read image data');
+                }
+                data = image.data;
+            } else {
+                const encodedFormat = target.format;
+                const exporter = this.panelExporters.get(panel);
+                if (!exporter) {
+                    throw new Error('Image editor was closed');
+                }
+                const quality = vscode.workspace.getConfiguration('imview').get('jpegQuality', 0.92);
+                data = await vscode.window.withProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title: `Encoding ${encodedFormat === 'png' ? 'PNG' : 'JPEG'} image`,
+                        cancellable: false,
+                    },
+                    () => exporter.request(
+                        message => panel.webview.postMessage(message),
+                        meta.id,
+                        encodedFormat,
+                        quality
+                    )
+                );
             }
 
-            if (format === 'bin') {
-                await vscode.workspace.fs.writeFile(uri, image.data);
-                vscode.window.showInformationMessage(`Image exported to ${uri.fsPath}`);
-            } else {
-                vscode.window.showWarningMessage('PNG/JPG export requires webview rendering');
-            }
+            await vscode.workspace.fs.writeFile(target.uri, data);
+            vscode.window.showInformationMessage(`Image exported to ${formatExportLocation(target.uri)}`);
         } catch (error) {
             vscode.window.showErrorMessage(`Failed to export: ${error}`);
         }
@@ -289,6 +329,11 @@ export class ImageEditorManager implements vscode.Disposable {
         }
         this.panels.clear();
         this.panelItems.clear();
+        this.displayedPanelItems.clear();
+        for (const exporter of this.panelExporters.values()) {
+            exporter.dispose();
+        }
+        this.panelExporters.clear();
     }
 
     /**
@@ -308,8 +353,8 @@ export class ImageEditorManager implements vscode.Disposable {
         }
     }
 
-    private postMessage(panel: vscode.WebviewPanel, message: ExtensionToWebviewMessage): void {
-        panel.webview.postMessage(message);
+    private postMessage(panel: vscode.WebviewPanel, message: ExtensionToWebviewMessage): Thenable<boolean> {
+        return panel.webview.postMessage(message);
     }
 
     private arrayToBase64(data: Uint8Array): string {

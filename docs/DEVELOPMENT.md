@@ -16,6 +16,7 @@ CodeImgWatch/
 │   ├── core/                   # 核心服务
 │   │   ├── debugSessionManager.ts   # 调试会话管理
 │   │   ├── imageExpressionParser.ts # 表达式解析器
+│   │   ├── imageExporter.ts         # PNG/JPEG 导出协调与校验
 │   │   └── imageOperators.ts        # 图像操作符
 │   ├── providers/              # VS Code 提供者
 │   │   ├── imageListProvider.ts     # TreeView 提供者
@@ -220,6 +221,16 @@ registerOperator('myop', async (args, context) => {
     command: 'setLoading',
     loading: boolean
 }
+
+// 请求 Webview 编码当前画布
+{
+    command: 'requestImageExport',
+    requestId: string,
+    imageId: string,
+    format: 'png' | 'jpg',
+    jpegQuality: number,
+    maxBytes: number
+}
 ```
 
 ### Webview → Extension
@@ -243,7 +254,18 @@ registerOperator('myop', async (args, context) => {
 // 导出图像
 {
     command: 'exportImage',
-    format: 'png' | 'jpg' | 'bin'
+    format?: 'png' | 'jpg' | 'bin',
+    imageId?: string,
+    name?: string
+}
+
+// 返回 Canvas 编码结果
+{
+    command: 'exportImageData',
+    requestId: string,
+    format: 'png' | 'jpg',
+    data?: string,   // base64
+    error?: string
 }
 
 // 选项变化
@@ -339,7 +361,6 @@ npm test
 
 ## 待实现功能
 
-- [ ] PNG/JPG 导出（Canvas 渲染）
 - [ ] 缩略图预览
 - [ ] ROI 选择
 - [ ] 直方图显示
