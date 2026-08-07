@@ -1,6 +1,7 @@
 import { DebugSessionManager, EvaluateResponse } from '../core/debugSessionManager';
 import { BaseImageParser } from './baseParser';
-import { ParseResult, ImageMetadata, PixelDepth, PixelDepthSize, decodeCvType, formatCvType } from '../types';
+import { ParseResult, ImageMetadata, PixelDepthSize, ChannelFormat, decodeCvType, formatCvType } from '../types';
+import { calculateDataSize } from '../utils/imageTransform';
 
 /**
  * Parser for cv::Mat type
@@ -12,7 +13,7 @@ export class CvMatParser extends BaseImageParser {
     canParse(typeName: string): boolean {
         // Match cv::Mat but not cv::Mat_ or cv::Matx
         const normalized = typeName.replace(/^(const\s+)?(class\s+|struct\s+)?/, '').trim();
-        return /^cv::Mat\s*[&*]?$/.test(normalized) || normalized === 'cv::Mat';
+        return /^cv::Mat\s*[&*]?(?:\s+const)?$/.test(normalized) || normalized === 'cv::Mat';
     }
 
     async parse(
@@ -20,22 +21,31 @@ export class CvMatParser extends BaseImageParser {
         expression: string,
         evaluateResult: EvaluateResponse
     ): Promise<ParseResult> {
-        const variablesRef = evaluateResult.variablesReference;
-
-        if (variablesRef === 0) {
-            return this.errorResult('Cannot access cv::Mat structure members');
-        }
-
         try {
             // Get all members at once for efficiency
-            const members = await session.getVariables(variablesRef);
+            const members = evaluateResult.variablesReference > 0
+                ? await session.getVariables(evaluateResult.variablesReference)
+                : [];
             const memberMap = new Map(members.map(m => [m.name, m]));
+            const typeName = evaluateResult.type ?? '';
 
             // Extract required fields
-            const rows = this.getMemberInt(memberMap, 'rows');
-            const cols = this.getMemberInt(memberMap, 'cols');
-            const flags = this.getMemberInt(memberMap, 'flags');
-            const dims = this.getMemberInt(memberMap, 'dims');
+            const rows = this.getMemberInt(memberMap, 'rows') ?? await this.evaluateAsInt(
+                session,
+                this.getMemberExpression(expression, typeName, 'rows')
+            );
+            const cols = this.getMemberInt(memberMap, 'cols') ?? await this.evaluateAsInt(
+                session,
+                this.getMemberExpression(expression, typeName, 'cols')
+            );
+            const flags = this.getMemberInt(memberMap, 'flags') ?? await this.evaluateAsInt(
+                session,
+                this.getMemberExpression(expression, typeName, 'flags')
+            );
+            const dims = this.getMemberInt(memberMap, 'dims') ?? await this.evaluateAsInt(
+                session,
+                this.getMemberExpression(expression, typeName, 'dims')
+            );
 
             // Validate required fields
             if (rows === undefined || cols === undefined) {
@@ -44,6 +54,9 @@ export class CvMatParser extends BaseImageParser {
 
             if (flags === undefined) {
                 return this.errorResult('Failed to read cv::Mat flags field');
+            }
+            if (dims !== undefined && dims !== 2) {
+                return this.errorResult(`Unsupported ${dims}D cv::Mat (only 2D matrices can be displayed)`);
             }
 
             // Decode type from flags
@@ -55,15 +68,16 @@ export class CvMatParser extends BaseImageParser {
 
             // Try memoryReference first
             const dataMember = memberMap.get('data');
-            if (dataMember?.memoryReference) {
-                dataAddress = dataMember.memoryReference;
-            } else if (dataMember) {
-                dataAddress = this.parsePointerValue(dataMember.value);
+            if (dataMember) {
+                dataAddress = this.parsePointerValue(dataMember.value) ?? dataMember.memoryReference;
             }
 
             // If not found, try evaluating the expression
             if (!dataAddress) {
-                dataAddress = await this.evaluateAsPointer(session, `${expression}.data`);
+                dataAddress = await this.evaluateAsPointer(
+                    session,
+                    this.getMemberExpression(expression, typeName, 'data')
+                );
             }
 
             if (!dataAddress) {
@@ -93,9 +107,16 @@ export class CvMatParser extends BaseImageParser {
                 }
             }
 
-            // Fallback: evaluate step[0] directly
+            // MatStep::operator[] is not available in some DAP evaluators.
+            const stepExpression = this.getMemberExpression(expression, typeName, 'step');
             if (stride === undefined) {
-                stride = await this.evaluateAsInt(session, `(int)${expression}.step[0]`);
+                stride = await this.evaluateAsInt(session, `${stepExpression}.p[0]`);
+            }
+            if (stride === undefined) {
+                stride = await this.evaluateAsInt(session, `${stepExpression}.buf[0]`);
+            }
+            if (stride === undefined) {
+                stride = await this.evaluateAsInt(session, `${stepExpression}[0]`);
             }
 
             // Fallback: calculate from width and pixel size
@@ -108,19 +129,18 @@ export class CvMatParser extends BaseImageParser {
             const CV_MAT_CONT_FLAG = 1 << 14;
             const isContinuous = (flags & CV_MAT_CONT_FLAG) !== 0;
 
-            // Calculate data size
-            const dataSize = stride * rows;
-
-            // Validate dimensions
-            if (rows <= 0 || cols <= 0) {
-                return this.errorResult(`Invalid cv::Mat dimensions: ${cols}x${rows}`);
+            const validationError = this.getImageValidationError(cols, rows, channels, depth, stride);
+            if (validationError) {
+                return this.errorResult(validationError);
             }
 
-            // Check for reasonable size
-            const maxDim = 16384;
-            if (rows > maxDim || cols > maxDim) {
-                return this.errorResult(`cv::Mat dimensions too large: ${cols}x${rows} (max: ${maxDim}x${maxDim})`);
-            }
+            const channelFormat = channels === 1
+                ? ChannelFormat.GRAY
+                : channels === 3
+                    ? ChannelFormat.BGR
+                    : channels === 4
+                        ? ChannelFormat.BGRA
+                        : undefined;
 
             const metadata: ImageMetadata = {
                 id: this.generateImageId(expression),
@@ -133,7 +153,8 @@ export class CvMatParser extends BaseImageParser {
                 height: rows,
                 stride,
                 dataAddress,
-                dataSize,
+                dataSize: 0,
+                channelFormat,
                 isContinuous,
                 debuggerType: session.getDebuggerType(),
                 frameId: session.currentFrameId,
@@ -143,6 +164,7 @@ export class CvMatParser extends BaseImageParser {
                     cvType,
                 },
             };
+            metadata.dataSize = calculateDataSize(metadata);
 
             const warnings: string[] = [];
             if (!isContinuous) {

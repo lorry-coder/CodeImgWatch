@@ -79,7 +79,11 @@ export class PixelInspector {
         // Get and display pixel value
         const values = this.renderer.getPixelValue(imageX, imageY);
         if (values && this.pixelInfoElement) {
-            this.pixelInfoElement.textContent = this.formatPixelValue(values, imageInfo.pixelType);
+            this.pixelInfoElement.textContent = this.formatPixelValue(
+                values,
+                imageInfo.pixelType,
+                imageInfo.channelFormat
+            );
         }
     }
 
@@ -98,11 +102,12 @@ export class PixelInspector {
     /**
      * Format pixel values for display
      */
-    private formatPixelValue(values: number[], pixelType: string): string {
+    private formatPixelValue(values: number[], pixelType: string, channelFormat?: string): string {
         const isFloat = pixelType.startsWith('float');
+        const channelNames = this.getChannelNames(values.length, channelFormat);
 
         const formatted = values.map((v, i) => {
-            const channelName = ['B', 'G', 'R', 'A'][i] ?? `C${i}`;
+            const channelName = channelNames[i] ?? `C${i}`;
 
             if (this.displayFormat === 'hex' && !isFloat) {
                 const hex = Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0').toUpperCase();
@@ -236,7 +241,7 @@ export class PixelInspector {
                 overlay.textContent = text;
 
                 // Determine text color based on brightness
-                const brightness = this.calculateBrightness(values, channels);
+                const brightness = this.calculateBrightness(values, channels, imageInfo.channelFormat);
                 overlay.style.color = brightness > 128 ? 'black' : 'white';
                 overlay.style.textShadow = brightness > 128
                     ? '0 0 2px white, 0 0 2px white'
@@ -251,15 +256,32 @@ export class PixelInspector {
     /**
      * Calculate brightness for text color selection
      */
-    private calculateBrightness(values: number[], channels: number): number {
+    private calculateBrightness(values: number[], channels: number, channelFormat?: string): number {
         if (channels === 1) {
             return values[0];
+        } else if (channelFormat === 'gray-alpha') {
+            return values[0];
         } else if (channels >= 3) {
-            // BGR order - use luminance formula
-            return 0.114 * values[0] + 0.587 * values[1] + 0.299 * values[2];
+            const isRgb = channelFormat === 'rgb' || channelFormat === 'rgba';
+            return isRgb
+                ? 0.299 * values[0] + 0.587 * values[1] + 0.114 * values[2]
+                : 0.114 * values[0] + 0.587 * values[1] + 0.299 * values[2];
         } else {
             return values.reduce((a, b) => a + b, 0) / values.length;
         }
+    }
+
+    private getChannelNames(channels: number, channelFormat?: string): string[] {
+        if (channels === 1) {
+            return ['Y'];
+        }
+        if (channelFormat === 'gray-alpha') {
+            return ['Y', 'A'];
+        }
+        if (channelFormat === 'rgb' || channelFormat === 'rgba') {
+            return ['R', 'G', 'B', 'A'];
+        }
+        return ['B', 'G', 'R', 'A'];
     }
 
     /**

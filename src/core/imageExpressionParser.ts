@@ -131,7 +131,7 @@ class Tokenizer {
     }
 
     private isIdentifierChar(char: string): boolean {
-        return /[a-zA-Z0-9_:.<>\[\]&*\->]/.test(char);
+        return /[-a-zA-Z0-9_:.<>&*]/.test(char) || char === '[' || char === ']';
     }
 
     private readString(quote: string): void {
@@ -204,6 +204,7 @@ class Tokenizer {
     private readIdentifier(): void {
         const startPos = this.position;
         let value = '';
+        const isOperatorName = this.tokens[this.tokens.length - 1]?.type === TokenType.AT;
 
         // Handle complex C++ expressions like arr[0], ptr->member, etc.
         let parenDepth = 0;
@@ -212,11 +213,23 @@ class Tokenizer {
         while (this.position < this.input.length) {
             const char = this.input[this.position];
 
+            if (isOperatorName && char === '(') {
+                break;
+            }
+
             // Track nested parens/brackets
-            if (char === '(') parenDepth++;
-            if (char === ')') parenDepth--;
-            if (char === '[') bracketDepth++;
-            if (char === ']') bracketDepth--;
+            if (char === '(') {
+                parenDepth++;
+            }
+            if (char === ')') {
+                parenDepth--;
+            }
+            if (char === '[') {
+                bracketDepth++;
+            }
+            if (char === ']') {
+                bracketDepth--;
+            }
 
             // Stop at top-level delimiters
             if (parenDepth === 0 && bracketDepth === 0) {
@@ -235,7 +248,7 @@ class Tokenizer {
             } else if (/\s/.test(char)) {
                 // Allow spaces within complex expressions
                 const remaining = this.input.slice(this.position).trimStart();
-                if (remaining.length > 0 && /[.\-\[<>]/.test(remaining[0])) {
+                if (remaining.length > 0 && ['.', '-', '[', '<', '>'].includes(remaining[0])) {
                     this.position++;
                 } else {
                     break;

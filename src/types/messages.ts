@@ -30,6 +30,10 @@ export interface DisplayImageMessage extends BaseMessage {
     pixelType: string;
     /** Row stride in bytes */
     stride: number;
+    /** Raw channel order */
+    channelFormat?: string;
+    /** Byte order for multi-byte values */
+    byteOrder: 'little' | 'big';
     /** Image name for display */
     name: string;
     /** Full type name */
@@ -204,6 +208,8 @@ export function createDisplayImageMessage(
         channels: metadata.channels,
         pixelType: getPixelTypeName(metadata.depth),
         stride: metadata.stride,
+        channelFormat: metadata.channelFormat,
+        byteOrder: metadata.byteOrder ?? 'little',
         name: metadata.name,
         typeName: metadata.typeName,
     };

@@ -3,9 +3,22 @@ import {
     parseAddress,
     addAddressOffset,
     formatAddress,
+    getPointerSize,
 } from '../../src/utils/platform';
 
 describe('Platform Utils', () => {
+    describe('getPointerSize', () => {
+        it('should treat x64 and arm64 as 64-bit architectures', () => {
+            assert.strictEqual(getPointerSize('x64'), 8);
+            assert.strictEqual(getPointerSize('arm64'), 8);
+        });
+
+        it('should treat ia32 and arm as 32-bit architectures', () => {
+            assert.strictEqual(getPointerSize('ia32'), 4);
+            assert.strictEqual(getPointerSize('arm'), 4);
+        });
+    });
+
     describe('parseAddress', () => {
         it('should parse hex address with 0x prefix', () => {
             const addr = parseAddress('0x12345678');

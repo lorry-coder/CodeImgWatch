@@ -2,9 +2,10 @@
  * NumPy ndarray parser for Python debugger (debugpy)
  */
 
-import { DebugSessionManager, EvaluateResponse } from '../core/debugSessionManager';
+import * as vscode from 'vscode';
+import { DebugSessionManager } from '../core/debugSessionManager';
 import { ImageMetadata, ParseResult, ImageTypeName } from '../types';
-import { PixelDepth, PixelDepthSize, ChannelFormat } from '../types/pixelFormats';
+import { PixelDepth, PixelDepthSize, ChannelFormat, ByteOrder } from '../types/pixelFormats';
 import { BaseImageParser } from './baseParser';
 
 /**
@@ -46,8 +47,7 @@ export class NumpyArrayParser extends BaseImageParser {
 
     async parse(
         session: DebugSessionManager,
-        expression: string,
-        evaluateResult: EvaluateResponse
+        expression: string
     ): Promise<ParseResult> {
         try {
             // Get shape
@@ -77,15 +77,6 @@ export class NumpyArrayParser extends BaseImageParser {
                 return this.errorResult(`Unsupported array dimensions: ${shape.length}D (expected 2D or 3D)`);
             }
 
-            // Validate dimensions
-            if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
-                return this.errorResult(`Invalid dimensions: ${width}x${height}`);
-            }
-
-            if (channels < 1 || channels > 4) {
-                return this.errorResult(`Unsupported channel count: ${channels}`);
-            }
-
             // Get dtype
             const dtypeResult = await session.evaluatePythonAsString(`str(${expression}.dtype)`);
             if (!dtypeResult) {
@@ -106,6 +97,10 @@ export class NumpyArrayParser extends BaseImageParser {
             const bytesPerElement = PixelDepthSize[depth];
             const stride = width * channels * bytesPerElement;
             const dataSize = stride * height;
+            const validationError = this.getImageValidationError(width, height, channels, depth, stride);
+            if (validationError) {
+                return this.errorResult(validationError);
+            }
 
             // For numpy arrays, we use expression-based data reading
             // The dataAddress will be the expression itself for Python
@@ -116,11 +111,15 @@ export class NumpyArrayParser extends BaseImageParser {
             if (channels === 1) {
                 channelFormat = ChannelFormat.GRAY;
             } else if (channels === 3) {
-                // NumPy arrays from OpenCV are BGR, from others typically RGB
-                // We'll default to BGR as that's more common in image processing
-                channelFormat = ChannelFormat.BGR;
+                const order = vscode.workspace
+                    .getConfiguration('imview')
+                    .get<'bgr' | 'rgb'>('numpyChannelOrder', 'bgr');
+                channelFormat = order === 'rgb' ? ChannelFormat.RGB : ChannelFormat.BGR;
             } else if (channels === 4) {
-                channelFormat = ChannelFormat.BGRA;
+                const order = vscode.workspace
+                    .getConfiguration('imview')
+                    .get<'bgr' | 'rgb'>('numpyChannelOrder', 'bgr');
+                channelFormat = order === 'rgb' ? ChannelFormat.RGBA : ChannelFormat.BGRA;
             }
 
             const metadata: ImageMetadata = {
@@ -136,6 +135,7 @@ export class NumpyArrayParser extends BaseImageParser {
                 dataAddress,
                 dataSize,
                 channelFormat,
+                byteOrder: this.getNumpyByteOrder(dtypeResult),
                 isContinuous,
                 dataLayout: 'HWC',
                 debuggerType: 'debugpy',
@@ -176,5 +176,9 @@ export class NumpyArrayParser extends BaseImageParser {
         }
 
         return undefined;
+    }
+
+    private getNumpyByteOrder(dtype: string): ByteOrder {
+        return dtype.trim().startsWith('>') ? 'big' : 'little';
     }
 }

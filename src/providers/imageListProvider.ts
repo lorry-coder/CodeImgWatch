@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
-import { DebugSessionManager, StackFrameChangedEvent } from '../core/debugSessionManager';
+import { DebugSessionManager } from '../core/debugSessionManager';
 import { ImageParserRegistry, isKnownImageType, normalizeTypeName } from '../parsers/baseParser';
-import { ImageItem, ImageMetadata, ParseResult } from '../types';
+import { ImageItem } from '../types';
 
 /**
  * Tree item representing an image in the list
@@ -85,8 +85,11 @@ export class ImageListProvider implements vscode.TreeDataProvider<TreeItemType>,
     private setupEventListeners(): void {
         // Refresh when debugger stops
         this.disposables.push(
-            this.sessionManager.onDidStopOnBreakpoint(event => {
-                this.refresh();
+            this.sessionManager.onDidStopOnBreakpoint(() => {
+                const autoRefresh = vscode.workspace.getConfiguration('imview').get('autoRefresh', true);
+                if (autoRefresh) {
+                    void this.refresh();
+                }
             })
         );
 

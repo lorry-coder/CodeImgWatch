@@ -45,6 +45,7 @@ export const PixelDepthName: Record<PixelDepth, string> = {
  */
 export enum ChannelFormat {
     GRAY = 'gray',
+    GRAY_ALPHA = 'gray-alpha',
     BGR = 'bgr',
     RGB = 'rgb',
     BGRA = 'bgra',
@@ -55,6 +56,9 @@ export enum ChannelFormat {
     LAB = 'lab',
     LUV = 'luv',
 }
+
+/** Byte order used by multi-byte pixel values. */
+export type ByteOrder = 'little' | 'big';
 
 /**
  * OpenCV type encoding/decoding utilities

@@ -343,7 +343,7 @@ export class DebugSessionManager implements vscode.Disposable {
      * Read memory from the debugged process
      */
     public async readMemory(address: string, count: number): Promise<Uint8Array | undefined> {
-        if (!this._activeSession) {
+        if (!this._activeSession || !this.isValidTransferSize(count)) {
             return undefined;
         }
 
@@ -355,13 +355,7 @@ export class DebugSessionManager implements vscode.Disposable {
             }) as ReadMemoryResponse;
 
             if (response.data) {
-                // Decode base64 to Uint8Array
-                const binaryString = atob(response.data);
-                const bytes = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
-                }
-                return bytes;
+                return new Uint8Array(Buffer.from(response.data, 'base64'));
             }
 
             return undefined;
@@ -375,7 +369,8 @@ export class DebugSessionManager implements vscode.Disposable {
      * Read memory in chunks to handle large images
      */
     public async readMemoryChunked(address: string, totalSize: number, chunkSize: number = 65536): Promise<Uint8Array | undefined> {
-        if (!this._activeSession) {
+        if (!this._activeSession || !this.isValidTransferSize(totalSize) ||
+            !Number.isSafeInteger(chunkSize) || chunkSize <= 0) {
             return undefined;
         }
 
@@ -387,23 +382,25 @@ export class DebugSessionManager implements vscode.Disposable {
             const readSize = Math.min(chunkSize, remaining);
 
             try {
-                // Calculate address with offset
-                const currentAddress = this.addToAddress(address, offset);
-
                 const response = await this._activeSession.customRequest('readMemory', {
-                    memoryReference: currentAddress,
-                    offset: 0,
+                    // DAP memory references are opaque. Advance with the request offset.
+                    memoryReference: address,
+                    offset,
                     count: readSize,
                 }) as ReadMemoryResponse;
 
                 if (response.data) {
-                    const binaryString = atob(response.data);
-                    for (let i = 0; i < binaryString.length; i++) {
-                        result[offset + i] = binaryString.charCodeAt(i);
+                    const bytes = new Uint8Array(Buffer.from(response.data, 'base64'));
+                    if (bytes.length === 0 || bytes.length > readSize || (response.unreadableBytes ?? 0) > 0) {
+                        console.error(
+                            `[ImView] Incomplete memory read at offset ${offset}: requested ${readSize}, got ${bytes.length}`
+                        );
+                        return undefined;
                     }
-                    offset += binaryString.length;
+                    result.set(bytes, offset);
+                    offset += bytes.length;
                 } else {
-                    console.error(`No data returned for memory read at ${currentAddress}`);
+                    console.error(`No data returned for memory read at offset ${offset}`);
                     return undefined;
                 }
             } catch (error) {
@@ -415,20 +412,19 @@ export class DebugSessionManager implements vscode.Disposable {
         return result;
     }
 
-    /**
-     * Add offset to a hex address string
-     */
-    private addToAddress(address: string, offset: number): string {
-        // Parse address (handle various formats: 0x1234, 1234, etc.)
-        let addr: bigint;
-        if (address.startsWith('0x') || address.startsWith('0X')) {
-            addr = BigInt(address);
-        } else {
-            addr = BigInt('0x' + address);
-        }
+    private isValidTransferSize(size: number): boolean {
+        const configuredLimit = vscode.workspace
+            .getConfiguration('imview')
+            .get<number>('maxImageBytes', 256 * 1024 * 1024);
+        const maxBytes = Number.isFinite(configuredLimit) && configuredLimit > 0
+            ? Math.floor(configuredLimit)
+            : 256 * 1024 * 1024;
 
-        const newAddr = addr + BigInt(offset);
-        return '0x' + newAddr.toString(16);
+        if (!Number.isSafeInteger(size) || size <= 0 || size > maxBytes) {
+            console.error(`[ImView] Refusing invalid or oversized image transfer: ${size} bytes (max ${maxBytes})`);
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -576,13 +572,7 @@ export class DebugSessionManager implements vscode.Disposable {
                 base64Data = base64Data.slice(1, -1);
             }
 
-            // Decode base64 to Uint8Array
-            const binaryString = atob(base64Data);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-            }
-            return bytes;
+            return new Uint8Array(Buffer.from(base64Data, 'base64'));
         } catch (error) {
             console.error(`Failed to read memory via Python:`, error);
             return undefined;
@@ -600,6 +590,9 @@ export class DebugSessionManager implements vscode.Disposable {
             return undefined;
         }
 
+        const tempVarName = `_imview_temp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        let temporaryValueCreated = false;
+
         try {
             // Build the expression to get contiguous data
             let dataExpr: string;
@@ -614,10 +607,10 @@ export class DebugSessionManager implements vscode.Disposable {
 
             // First, store the array in a temporary variable and get its size
             // This avoids re-evaluating the expression multiple times
-            const tempVarName = `_imview_temp_${Date.now()}`;
             const storeExpr = `globals().__setitem__('${tempVarName}', ${dataExpr}.tobytes()) or len(globals()['${tempVarName}'])`;
 
             console.log(`[ImView] Store expression: ${storeExpr}`);
+            temporaryValueCreated = true;
             const sizeResult = await this.evaluate(storeExpr, 'repl');
             console.log(`[ImView] Size result:`, JSON.stringify(sizeResult));
 
@@ -625,12 +618,9 @@ export class DebugSessionManager implements vscode.Disposable {
                 console.error(`[ImView] Failed to store Python array data, result:`, sizeResult);
                 return undefined;
             }
-
             const totalSize = parseInt(sizeResult.result, 10);
-            if (isNaN(totalSize) || totalSize <= 0) {
+            if (!this.isValidTransferSize(totalSize)) {
                 console.error(`[ImView] Invalid array size: ${sizeResult.result}`);
-                // Clean up temp variable
-                await this.evaluate(`globals().pop('${tempVarName}', None)`, 'repl');
                 return undefined;
             }
 
@@ -653,8 +643,6 @@ export class DebugSessionManager implements vscode.Disposable {
 
                 if (!chunkResult || !chunkResult.result) {
                     console.error(`[ImView] Failed to read chunk at offset ${offset}, result:`, chunkResult);
-                    // Clean up temp variable
-                    await this.evaluate(`globals().pop('${tempVarName}', None)`, 'repl');
                     return undefined;
                 }
 
@@ -675,36 +663,35 @@ export class DebugSessionManager implements vscode.Disposable {
                     console.error(`[ImView] Invalid base64 string at offset ${offset}, length: ${base64Data.length}`);
                     console.error(`[ImView] First 100 chars: ${base64Data.substring(0, 100)}`);
                     console.error(`[ImView] Last 100 chars: ${base64Data.substring(base64Data.length - 100)}`);
-                    // Clean up temp variable
-                    await this.evaluate(`globals().pop('${tempVarName}', None)`, 'repl');
                     return undefined;
                 }
 
                 // Decode base64 chunk
                 try {
-                    const binaryString = atob(base64Data);
-                    for (let i = 0; i < binaryString.length; i++) {
-                        result[offset + i] = binaryString.charCodeAt(i);
+                    const bytes = new Uint8Array(Buffer.from(base64Data, 'base64'));
+                    if (bytes.length !== readSize) {
+                        console.error(`[ImView] Python chunk size mismatch: expected ${readSize}, got ${bytes.length}`);
+                        return undefined;
                     }
-                    offset += binaryString.length;
+                    result.set(bytes, offset);
+                    offset += bytes.length;
                     console.log(`[ImView] Read chunk: ${offset}/${totalSize} bytes`);
                 } catch (decodeError) {
                     console.error(`[ImView] Failed to decode base64 at offset ${offset}:`, decodeError);
                     console.error(`[ImView] Base64 length: ${base64Data.length}`);
-                    // Clean up temp variable
-                    await this.evaluate(`globals().pop('${tempVarName}', None)`, 'repl');
                     return undefined;
                 }
             }
-
-            // Clean up temp variable
-            await this.evaluate(`globals().pop('${tempVarName}', None)`, 'repl');
 
             console.log(`[ImView] Successfully read ${result.length} bytes`);
             return result;
         } catch (error) {
             console.error(`[ImView] Failed to read Python array data:`, error);
             return undefined;
+        } finally {
+            if (temporaryValueCreated) {
+                await this.evaluate(`globals().pop('${tempVarName}', None)`, 'repl');
+            }
         }
     }
 
@@ -750,17 +737,24 @@ export class DebugSessionManager implements vscode.Disposable {
         }
 
         try {
-            // Parse tuple/list format like (100, 200, 3) or [100, 200, 3]
             const str = result.result.trim();
-            const match = str.match(/[\(\[](.*)[\)\]]/);
-            if (!match) {
+            const isTuple = str.startsWith('(') && str.endsWith(')');
+            const isList = str.startsWith('[') && str.endsWith(']');
+            if (!isTuple && !isList) {
                 return undefined;
             }
 
-            const values = match[1].split(',').map(v => {
-                const num = parseFloat(v.trim());
-                return isNaN(num) ? 0 : num;
-            });
+            const contents = str.slice(1, -1).trim();
+            if (contents.length === 0) {
+                return [];
+            }
+
+            const parts = contents.split(',');
+            const values = parts.map(value => Number(value.trim()));
+
+            if (values.some(value => !Number.isFinite(value))) {
+                return undefined;
+            }
 
             return values;
         } catch {

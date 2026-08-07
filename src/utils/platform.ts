@@ -59,6 +59,11 @@ export function isX86(): boolean {
     return arch === 'ia32' || arch === 'x64';
 }
 
+/** Return the native pointer size for a Node architecture name. */
+export function getPointerSize(architecture: string = getArchitecture()): number {
+    return ['x64', 'arm64', 'ppc64', 's390x'].includes(architecture) ? 8 : 4;
+}
+
 /**
  * Normalize path for the current platform
  */
@@ -91,8 +96,7 @@ export function formatAddress(address: string): string {
     }
 
     // Pad to appropriate width based on architecture
-    const arch = getArchitecture();
-    const width = arch === 'x64' ? 16 : 8;
+    const width = getPointerSize() * 2;
 
     const hex = normalized.slice(2);
     return '0x' + hex.padStart(width, '0');
@@ -134,7 +138,7 @@ export interface DebuggerHints {
  */
 export function getMsvcDebuggerHints(): DebuggerHints {
     return {
-        pointerSize: getArchitecture() === 'x64' ? 8 : 4,
+        pointerSize: getPointerSize(),
         typeAliases: {
             'cv::Mat': ['class cv::Mat', 'struct cv::Mat'],
             'size_t': ['unsigned __int64', 'unsigned int'],
@@ -151,7 +155,7 @@ export function getMsvcDebuggerHints(): DebuggerHints {
  */
 export function getGdbDebuggerHints(): DebuggerHints {
     return {
-        pointerSize: getArchitecture() === 'x64' ? 8 : 4,
+        pointerSize: getPointerSize(),
         typeAliases: {
             'cv::Mat': ['cv::Mat'],
             'size_t': ['size_t', 'unsigned long', 'unsigned long long'],
@@ -168,7 +172,7 @@ export function getGdbDebuggerHints(): DebuggerHints {
  */
 export function getLldbDebuggerHints(): DebuggerHints {
     return {
-        pointerSize: getArchitecture() === 'x64' ? 8 : 4,
+        pointerSize: getPointerSize(),
         typeAliases: {
             'cv::Mat': ['cv::Mat'],
             'size_t': ['size_t', 'unsigned long'],

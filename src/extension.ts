@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { DebugSessionManager } from './core/debugSessionManager';
+import { readImageDataForDisplay } from './core/imageDataReader';
 import { registerBuiltInParsers, ImageParserRegistry, isKnownImageType, normalizeTypeName } from './parsers';
 import { ImageListProvider, ImageTreeItem } from './providers/imageListProvider';
 import { ImageViewerProvider } from './providers/imageViewerProvider';
@@ -13,6 +14,35 @@ let imageViewerProvider: ImageViewerProvider;
 let imageEditorManager: ImageEditorManager;
 let debugVariableDecorator: DebugVariableDecorator;
 let debugAdapterTrackerFactory: ImageWatchDebugAdapterTrackerFactory;
+
+interface DebugVariableContext {
+    evaluateName?: string;
+    name?: string;
+    type?: string;
+    variable?: DebugVariableContext;
+    container?: DebugVariableContext;
+}
+
+function getDebugVariableContext(value: unknown): DebugVariableContext | undefined {
+    return typeof value === 'object' && value !== null
+        ? value as DebugVariableContext
+        : undefined;
+}
+
+function getDebugVariableDetails(value: unknown): { expression?: string; typeName?: string } {
+    const context = getDebugVariableContext(value);
+    if (!context) {
+        return {};
+    }
+
+    const nested = context.variable;
+    const container = context.container;
+    return {
+        expression: context.evaluateName ?? context.name ?? nested?.evaluateName ?? nested?.name
+            ?? container?.evaluateName ?? container?.name,
+        typeName: context.type ?? nested?.type ?? container?.type,
+    };
+}
 
 /**
  * Extension activation
@@ -89,7 +119,8 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((e) => {
             if (e.affectsConfiguration('imview')) {
-                // Custom type parser will reload configurations on next use
+                imageViewerProvider.reloadConfiguration();
+                imageEditorManager.reloadConfiguration();
             }
         })
     );
@@ -194,17 +225,14 @@ function registerCommands(context: vscode.ExtensionContext): void {
             }
 
             try {
-                const data = await sessionManager.readMemoryChunked(
-                    item.metadata.dataAddress,
-                    item.metadata.dataSize
-                );
+                const image = await readImageDataForDisplay(sessionManager, item.metadata);
 
-                if (!data) {
+                if (!image) {
                     throw new Error('Failed to read image data');
                 }
 
                 if (format.value === 'bin') {
-                    await vscode.workspace.fs.writeFile(uri, data);
+                    await vscode.workspace.fs.writeFile(uri, image.data);
                     vscode.window.showInformationMessage(`Image exported to ${uri.fsPath}`);
                 } else {
                     // PNG/JPG export would need canvas rendering
@@ -248,30 +276,25 @@ function registerCommands(context: vscode.ExtensionContext): void {
 
     // Visualize a variable from VARIABLES/WATCH panel or editor selection
     context.subscriptions.push(
-        vscode.commands.registerCommand('imview.visualizeVariable', async (debugVariable?: any) => {
+        vscode.commands.registerCommand('imview.visualizeVariable', async (debugVariable?: unknown) => {
             await visualizeDebugVariable(debugVariable);
         })
     );
 
     // Visualize in a separate panel/editor
     context.subscriptions.push(
-        vscode.commands.registerCommand('imview.visualizeVariableInPanel', async (debugVariable?: any) => {
+        vscode.commands.registerCommand('imview.visualizeVariableInPanel', async (debugVariable?: unknown) => {
             await visualizeDebugVariable(debugVariable, true);
         })
     );
 
     // Add a variable to the watch list (from context menu - no dialog)
     context.subscriptions.push(
-        vscode.commands.registerCommand('imview.addToWatch', async (debugVariable?: any) => {
+        vscode.commands.registerCommand('imview.addToWatch', async (debugVariable?: unknown) => {
             let expression: string | undefined;
 
             // First, try to extract from debug variable object (from VARIABLES/WATCH panel)
-            if (debugVariable && typeof debugVariable === 'object') {
-                expression = debugVariable.evaluateName
-                    || debugVariable.name
-                    || debugVariable.variable?.evaluateName
-                    || debugVariable.variable?.name;
-            }
+            expression = getDebugVariableDetails(debugVariable).expression;
 
             if (typeof debugVariable === 'string') {
                 expression = debugVariable;
@@ -321,7 +344,7 @@ function registerCommands(context: vscode.ExtensionContext): void {
 /**
  * Visualize a debug variable
  */
-async function visualizeDebugVariable(debugVariable?: any, openInEditor: boolean = false): Promise<void> {
+async function visualizeDebugVariable(debugVariable?: unknown, openInEditor: boolean = false): Promise<void> {
     // Check if we have an active debug session
     if (!sessionManager.activeSession) {
         vscode.window.showWarningMessage('No active debug session. Start debugging first.');
@@ -334,19 +357,11 @@ async function visualizeDebugVariable(debugVariable?: any, openInEditor: boolean
     }
 
     let expression: string | undefined;
-    let typeName: string | undefined;
 
     // First, try to extract from debug variable object (from VARIABLES/WATCH panel)
-    if (debugVariable && typeof debugVariable === 'object') {
-        expression = debugVariable.evaluateName || debugVariable.name || debugVariable.variable?.evaluateName || debugVariable.variable?.name;
-        typeName = debugVariable.type || debugVariable.variable?.type;
-
-        // Try to extract from container if nested
-        if (!expression && debugVariable.container) {
-            expression = debugVariable.container.evaluateName || debugVariable.container.name;
-            typeName = debugVariable.container.type;
-        }
-    }
+    const details = getDebugVariableDetails(debugVariable);
+    expression = details.expression;
+    const typeName = details.typeName;
 
     if (typeof debugVariable === 'string') {
         expression = debugVariable;

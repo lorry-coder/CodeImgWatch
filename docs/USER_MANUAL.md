@@ -60,7 +60,7 @@
 | 项目 | 要求 |
 |------|------|
 | VS Code | 1.85.0 或更高版本 |
-| 操作系统 | Windows x86/x64, Linux x86/x64 |
+| 操作系统 | Windows、macOS、Linux（x64/ARM64） |
 | 调试器 | GDB, LLDB, MSVC Debugger, 或 debugpy (Python) |
 
 ### 2.2 安装插件
@@ -77,7 +77,7 @@
 #### 方式二：命令行安装
 
 ```bash
-code --install-extension imview-0.1.0.vsix
+code --install-extension imview-0.1.1.vsix
 ```
 
 ### 2.3 调试器配置
@@ -198,7 +198,7 @@ img_float = np.random.rand(50, 50).astype(np.float32)
 # PIL 图像
 img_pil = Image.fromarray(img_np)
 
-# PyTorch 张量 (CHW 格式, 仅支持 CPU)
+# PyTorch 张量（CHW 格式；加速器数据会自动复制到 CPU）
 img_torch = torch.rand(3, 64, 64)
 
 # 在此设置断点
@@ -324,7 +324,7 @@ breakpoint()  # 或者在此行点击设置断点
 **Python:**
 - `numpy.ndarray` (包括 OpenCV-Python 返回的数组)
 - `PIL.Image.Image`
-- `torch.Tensor` (仅 CPU)
+- `torch.Tensor`（CPU 或加速器）
 
 ### 5.2 手动添加监视表达式 (Watch 模式)
 
@@ -545,7 +545,7 @@ Pillow 图像对象，支持多种模式：
 
 #### torch.Tensor
 
-PyTorch 张量，**仅支持 CPU 张量**。
+PyTorch 张量会通过连续的 NumPy 缓冲区传输；CUDA 等加速器上的张量会先复制到 CPU。
 
 | 维度 | 格式 | 说明 |
 |------|------|------|
@@ -554,7 +554,7 @@ PyTorch 张量，**仅支持 CPU 张量**。
 | 4D (N, C, H, W) | 批量图像 | 取第一张 |
 
 **注意事项：**
-- GPU 张量需要先调用 `.cpu()` 移到 CPU
+- 大型 GPU 张量的设备到主机复制可能增加断点停顿时间
 - CHW 格式会自动转换为 HWC 格式显示
 - 支持 `torch.float32`, `torch.float64`, `torch.uint8` 等常见 dtype
 
@@ -667,6 +667,8 @@ cv::Vec4b pixel;
 | `imview.autoRefresh` | `true` | 断点暂停时自动刷新图像 |
 | `imview.defaultColormap` | `"grayscale"` | 单通道图像默认色彩映射 |
 | `imview.maxImageSize` | `4096` | 最大支持的图像尺寸 |
+| `imview.maxImageBytes` | `268435456` | 单张图像最大调试器传输字节数 |
+| `imview.numpyChannelOrder` | `"bgr"` | NumPy 三/四通道数组的默认通道顺序 |
 | `imview.thumbnailSize` | `64` | 缩略图大小 |
 | `imview.autoNormalize` | `true` | 自动归一化非 8-bit 图像 |
 | `imview.showPixelGrid` | `true` | 高缩放时显示像素网格 |
@@ -680,6 +682,8 @@ cv::Vec4b pixel;
     "imview.autoRefresh": true,
     "imview.defaultColormap": "viridis",
     "imview.maxImageSize": 8192,
+    "imview.maxImageBytes": 268435456,
+    "imview.numpyChannelOrder": "bgr",
     "imview.showPixelGrid": true,
     "imview.pixelGridZoomThreshold": 10,
     "imview.customTypes": []
@@ -786,7 +790,7 @@ cv::Vec4b pixel;
 - ✅ 支持 Python debugpy 调试器
 - ✅ 支持 `numpy.ndarray` 图像可视化 (包括 OpenCV-Python)
 - ✅ 支持 `PIL.Image.Image` 图像可视化
-- ✅ 支持 `torch.Tensor` 张量可视化 (仅 CPU)
+- ✅ 支持 `torch.Tensor` 张量可视化（加速器张量自动复制到 CPU）
 - ✅ 自动处理 PyTorch CHW 格式转换为 HWC
 - ✅ 支持多种 NumPy dtype (uint8, int8, uint16, int16, int32, float32, float64)
 - ✅ 分块传输大图像数据，解决 debugpy 输出限制问题
@@ -808,7 +812,7 @@ cv::Vec4b pixel;
 - ✅ 实现 A/B 对比功能
 - ✅ 支持右键菜单快速添加变量到监视列表
 - ✅ 支持从代码编辑器选中变量直接可视化
-- ✅ 支持 Windows x86/x64 和 Linux x86/x64
+- ✅ 支持 Windows、macOS、Linux（x64/ARM64）
 
 ---
 

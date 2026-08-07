@@ -2,9 +2,9 @@
  * PIL (Pillow) Image parser for Python debugger (debugpy)
  */
 
-import { DebugSessionManager, EvaluateResponse } from '../core/debugSessionManager';
+import { DebugSessionManager } from '../core/debugSessionManager';
 import { ImageMetadata, ParseResult, ImageTypeName } from '../types';
-import { PixelDepth, ChannelFormat } from '../types/pixelFormats';
+import { PixelDepth, PixelDepthSize, ChannelFormat, ByteOrder } from '../types/pixelFormats';
 import { BaseImageParser } from './baseParser';
 
 /**
@@ -14,26 +14,29 @@ interface PILModeInfo {
     channels: number;
     depth: PixelDepth;
     channelFormat?: ChannelFormat;
+    conversionMode?: string;
+    byteOrder?: ByteOrder;
 }
 
 const PIL_MODE_MAP: Record<string, PILModeInfo> = {
-    '1': { channels: 1, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.GRAY },      // 1-bit pixels, black and white
+    '1': { channels: 1, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.GRAY, conversionMode: 'L' },
     'L': { channels: 1, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.GRAY },      // 8-bit grayscale
-    'P': { channels: 1, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.GRAY },      // 8-bit palette
+    'P': { channels: 4, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGBA, conversionMode: 'RGBA' },
     'RGB': { channels: 3, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGB },     // 3x8-bit RGB
     'RGBA': { channels: 4, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGBA },   // 4x8-bit RGBA
-    'CMYK': { channels: 4, depth: PixelDepth.CV_8U },                                       // 4x8-bit CMYK
-    'YCbCr': { channels: 3, depth: PixelDepth.CV_8U },                                      // 3x8-bit YCbCr
-    'LAB': { channels: 3, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.LAB },     // 3x8-bit LAB
-    'HSV': { channels: 3, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.HSV },     // 3x8-bit HSV
+    'CMYK': { channels: 3, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGB, conversionMode: 'RGB' },
+    'YCbCr': { channels: 3, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGB, conversionMode: 'RGB' },
+    'LAB': { channels: 3, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGB, conversionMode: 'RGB' },
+    'HSV': { channels: 3, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGB, conversionMode: 'RGB' },
     'I': { channels: 1, depth: PixelDepth.CV_32S, channelFormat: ChannelFormat.GRAY },     // 32-bit signed integer
     'F': { channels: 1, depth: PixelDepth.CV_32F, channelFormat: ChannelFormat.GRAY },     // 32-bit float
-    'I;16': { channels: 1, depth: PixelDepth.CV_16U, channelFormat: ChannelFormat.GRAY },  // 16-bit unsigned integer
-    'I;16L': { channels: 1, depth: PixelDepth.CV_16U, channelFormat: ChannelFormat.GRAY }, // 16-bit little-endian
-    'I;16B': { channels: 1, depth: PixelDepth.CV_16U, channelFormat: ChannelFormat.GRAY }, // 16-bit big-endian
-    'LA': { channels: 2, depth: PixelDepth.CV_8U },                                         // Grayscale + Alpha
-    'PA': { channels: 2, depth: PixelDepth.CV_8U },                                         // Palette + Alpha
-    'RGBa': { channels: 4, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGBA },   // Premultiplied RGBA
+    'I;16': { channels: 1, depth: PixelDepth.CV_16U, channelFormat: ChannelFormat.GRAY, byteOrder: 'little' },
+    'I;16L': { channels: 1, depth: PixelDepth.CV_16U, channelFormat: ChannelFormat.GRAY, byteOrder: 'little' },
+    'I;16B': { channels: 1, depth: PixelDepth.CV_16U, channelFormat: ChannelFormat.GRAY, byteOrder: 'big' },
+    'I;16N': { channels: 1, depth: PixelDepth.CV_16U, channelFormat: ChannelFormat.GRAY, byteOrder: 'little' },
+    'LA': { channels: 2, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.GRAY_ALPHA },
+    'PA': { channels: 4, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGBA, conversionMode: 'RGBA' },
+    'RGBa': { channels: 4, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGBA, conversionMode: 'RGBA' },
 };
 
 /**
@@ -49,8 +52,7 @@ export class PILImageParser extends BaseImageParser {
 
     async parse(
         session: DebugSessionManager,
-        expression: string,
-        evaluateResult: EvaluateResponse
+        expression: string
     ): Promise<ParseResult> {
         try {
             // Get image size (width, height)
@@ -60,11 +62,6 @@ export class PILImageParser extends BaseImageParser {
             }
 
             const [width, height] = size;
-
-            // Validate dimensions
-            if (width <= 0 || height <= 0 || width > 16384 || height > 16384) {
-                return this.errorResult(`Invalid dimensions: ${width}x${height}`);
-            }
 
             // Get image mode
             const mode = await session.evaluatePythonAsString(`${expression}.mode`);
@@ -78,13 +75,17 @@ export class PILImageParser extends BaseImageParser {
                 return this.errorResult(`Unsupported PIL mode: ${mode}`);
             }
 
-            const { channels, depth, channelFormat } = modeInfo;
+            const { channels, depth, channelFormat, conversionMode, byteOrder } = modeInfo;
 
             // Calculate stride and data size
             // PIL images are stored as HWC with no padding
             const bytesPerPixel = this.getBytesPerPixel(depth, channels);
             const stride = width * bytesPerPixel;
             const dataSize = stride * height;
+            const validationError = this.getImageValidationError(width, height, channels, depth, stride);
+            if (validationError) {
+                return this.errorResult(validationError);
+            }
 
             // For PIL images, we need to convert to numpy to get raw bytes
             // The expression for data reading will convert PIL to numpy
@@ -103,6 +104,7 @@ export class PILImageParser extends BaseImageParser {
                 dataAddress,
                 dataSize,
                 channelFormat,
+                byteOrder,
                 isContinuous: true, // PIL images are always contiguous
                 dataLayout: 'HWC',
                 debuggerType: 'debugpy',
@@ -110,6 +112,7 @@ export class PILImageParser extends BaseImageParser {
                     mode,
                     size,
                     isPIL: true,
+                    pilConversionMode: conversionMode,
                 },
             };
 
@@ -123,16 +126,6 @@ export class PILImageParser extends BaseImageParser {
      * Get bytes per pixel for a given depth and channel count
      */
     private getBytesPerPixel(depth: PixelDepth, channels: number): number {
-        const bytesPerElement: Record<PixelDepth, number> = {
-            [PixelDepth.CV_8U]: 1,
-            [PixelDepth.CV_8S]: 1,
-            [PixelDepth.CV_16U]: 2,
-            [PixelDepth.CV_16S]: 2,
-            [PixelDepth.CV_32S]: 4,
-            [PixelDepth.CV_32F]: 4,
-            [PixelDepth.CV_64F]: 8,
-            [PixelDepth.CV_16F]: 2,
-        };
-        return bytesPerElement[depth] * channels;
+        return PixelDepthSize[depth] * channels;
     }
 }

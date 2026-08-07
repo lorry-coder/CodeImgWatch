@@ -1,6 +1,7 @@
 import { DebugSessionManager, EvaluateResponse } from '../core/debugSessionManager';
 import { BaseImageParser } from './baseParser';
-import { ParseResult, ImageMetadata, PixelDepth, PixelDepthSize, formatCvType } from '../types';
+import { ParseResult, ImageMetadata, PixelDepth, PixelDepthSize, ChannelFormat } from '../types';
+import { calculateDataSize } from '../utils/imageTransform';
 
 /**
  * Map template type names to pixel depth
@@ -41,25 +42,31 @@ export class CvMatTemplateParser extends BaseImageParser {
         expression: string,
         evaluateResult: EvaluateResponse
     ): Promise<ParseResult> {
-        const variablesRef = evaluateResult.variablesReference;
-
-        if (variablesRef === 0) {
-            return this.errorResult('Cannot access cv::Mat_<T> structure members');
-        }
-
         try {
             // Extract template type from evaluateResult.type
             const templateType = this.extractTemplateType(evaluateResult.type ?? '');
             const depthFromTemplate = templateType ? this.getDepthFromTemplateType(templateType) : undefined;
 
             // Get all members
-            const members = await session.getVariables(variablesRef);
+            const members = evaluateResult.variablesReference > 0
+                ? await session.getVariables(evaluateResult.variablesReference)
+                : [];
             const memberMap = new Map(members.map(m => [m.name, m]));
+            const typeName = evaluateResult.type ?? '';
 
             // cv::Mat_<T> inherits from cv::Mat, so we can access the same members
-            const rows = this.getMemberInt(memberMap, 'rows');
-            const cols = this.getMemberInt(memberMap, 'cols');
-            const flags = this.getMemberInt(memberMap, 'flags');
+            const rows = this.getMemberInt(memberMap, 'rows') ?? await this.evaluateAsInt(
+                session,
+                this.getMemberExpression(expression, typeName, 'rows')
+            );
+            const cols = this.getMemberInt(memberMap, 'cols') ?? await this.evaluateAsInt(
+                session,
+                this.getMemberExpression(expression, typeName, 'cols')
+            );
+            const flags = this.getMemberInt(memberMap, 'flags') ?? await this.evaluateAsInt(
+                session,
+                this.getMemberExpression(expression, typeName, 'flags')
+            );
 
             if (rows === undefined || cols === undefined) {
                 return this.errorResult('Failed to read cv::Mat_<T> dimensions');
@@ -93,14 +100,15 @@ export class CvMatTemplateParser extends BaseImageParser {
             // Get data pointer
             let dataAddress: string | undefined;
             const dataMember = memberMap.get('data');
-            if (dataMember?.memoryReference) {
-                dataAddress = dataMember.memoryReference;
-            } else if (dataMember) {
-                dataAddress = this.parsePointerValue(dataMember.value);
+            if (dataMember) {
+                dataAddress = this.parsePointerValue(dataMember.value) ?? dataMember.memoryReference;
             }
 
             if (!dataAddress) {
-                dataAddress = await this.evaluateAsPointer(session, `${expression}.data`);
+                dataAddress = await this.evaluateAsPointer(
+                    session,
+                    this.getMemberExpression(expression, typeName, 'data')
+                );
             }
 
             if (!dataAddress || dataAddress === '0x0') {
@@ -108,17 +116,31 @@ export class CvMatTemplateParser extends BaseImageParser {
             }
 
             // Get stride
-            let stride = await this.evaluateAsInt(session, `(int)${expression}.step[0]`);
+            const stepExpression = this.getMemberExpression(expression, typeName, 'step');
+            let stride = await this.evaluateAsInt(session, `${stepExpression}.p[0]`);
+            if (stride === undefined) {
+                stride = await this.evaluateAsInt(session, `${stepExpression}.buf[0]`);
+            }
+            if (stride === undefined) {
+                stride = await this.evaluateAsInt(session, `${stepExpression}[0]`);
+            }
             if (stride === undefined) {
                 const pixelSize = PixelDepthSize[depth] * channels;
                 stride = cols * pixelSize;
             }
 
-            const dataSize = stride * rows;
-
-            if (rows <= 0 || cols <= 0) {
-                return this.errorResult(`Invalid dimensions: ${cols}x${rows}`);
+            const validationError = this.getImageValidationError(cols, rows, channels, depth, stride);
+            if (validationError) {
+                return this.errorResult(validationError);
             }
+
+            const channelFormat = channels === 1
+                ? ChannelFormat.GRAY
+                : channels === 3
+                    ? ChannelFormat.BGR
+                    : channels === 4
+                        ? ChannelFormat.BGRA
+                        : undefined;
 
             const metadata: ImageMetadata = {
                 id: this.generateImageId(expression),
@@ -131,11 +153,13 @@ export class CvMatTemplateParser extends BaseImageParser {
                 height: rows,
                 stride,
                 dataAddress,
-                dataSize,
+                dataSize: 0,
+                channelFormat,
                 isContinuous: (flags & (1 << 14)) !== 0,
                 debuggerType: session.getDebuggerType(),
                 frameId: session.currentFrameId,
             };
+            metadata.dataSize = calculateDataSize(metadata);
 
             return this.successResult(metadata);
         } catch (error) {
@@ -147,7 +171,7 @@ export class CvMatTemplateParser extends BaseImageParser {
      * Extract template type from full type name
      */
     private extractTemplateType(typeName: string): string | undefined {
-        const match = typeName.match(/cv::Mat_<(.+?)>(?:\s*[&*])?$/);
+        const match = typeName.match(/cv::Mat_<(.+?)>(?:\s*[&*])?(?:\s+const)?$/);
         if (match) {
             return match[1].trim();
         }

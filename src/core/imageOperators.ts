@@ -1,4 +1,4 @@
-import { ImageMetadata, ImageData, PixelDepth, PixelDepthSize } from '../types';
+import { ImageData, PixelDepth, PixelDepthSize } from '../types';
 import { ExpressionNode, OperatorNode } from './imageExpressionParser';
 import { DebugSessionManager } from './debugSessionManager';
 

@@ -135,7 +135,7 @@ export class IplImageParser extends BaseImageParser {
 
     canParse(typeName: string): boolean {
         const normalized = typeName.replace(/^(const\s+)?(struct\s+)?/, '').trim();
-        return /^(\_)?IplImage\s*[&*]?$/.test(normalized);
+        return /^_?IplImage\s*[&*]?$/.test(normalized);
     }
 
     async parse(

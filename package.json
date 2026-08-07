@@ -21,6 +21,9 @@
   "activationEvents": [
     "onStartupFinished"
   ],
+  "extensionKind": [
+    "workspace"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -48,7 +51,7 @@
     "viewsWelcome": [
       {
         "view": "imview.imageList",
-        "contents": "No active debug session.\n\n[Start Debugging](command:workbench.action.debug.start)\n\nImView displays image variables (cv::Mat, etc.) when debugging C/C++ programs."
+        "contents": "No active debug session.\n\n[Start Debugging](command:workbench.action.debug.start)\n\nImView displays OpenCV, NumPy, Pillow, and PyTorch images while debugging C/C++ or Python."
       }
     ],
     "commands": [
@@ -210,7 +213,27 @@
         "imview.maxImageSize": {
           "type": "number",
           "default": 4096,
+          "minimum": 1,
           "description": "Maximum image dimension (width or height) to display"
+        },
+        "imview.maxImageBytes": {
+          "type": "number",
+          "default": 268435456,
+          "minimum": 1,
+          "description": "Maximum number of image bytes transferred from the debugger (default 256 MiB)"
+        },
+        "imview.numpyChannelOrder": {
+          "type": "string",
+          "default": "bgr",
+          "enum": [
+            "bgr",
+            "rgb"
+          ],
+          "enumDescriptions": [
+            "OpenCV-compatible BGR/BGRA order",
+            "RGB/RGBA order used by many other Python image libraries"
+          ],
+          "description": "Default channel order for three- and four-channel NumPy arrays"
         },
         "imview.thumbnailSize": {
           "type": "number",
@@ -307,11 +330,12 @@
     "compile": "webpack",
     "watch": "webpack --watch",
     "package": "webpack --mode production --devtool hidden-source-map",
-    "compile-tests": "tsc -p . --outDir out",
-    "watch-tests": "tsc -p . -w --outDir out",
+    "package:vsix": "vsce package --no-dependencies --allow-missing-repository",
+    "compile-tests": "tsc -p ./tsconfig.test.json",
+    "watch-tests": "tsc -p ./tsconfig.test.json -w",
     "pretest": "npm run compile-tests && npm run compile",
     "test": "node ./out/test/runTest.js",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src webview test --ext ts"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.6",

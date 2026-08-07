@@ -11,6 +11,8 @@ export interface ImageInfo {
     channels: number;
     pixelType: string;
     stride: number;
+    channelFormat?: string;
+    byteOrder: 'little' | 'big';
     name: string;
     typeName: string;
 }
@@ -34,6 +36,7 @@ export class ImageRenderer {
     private imageData: ImageData | null = null;
     private currentInfo: ImageInfo | null = null;
     private rawData: Uint8Array | null = null;
+    private rawView: DataView | null = null;
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
@@ -50,6 +53,7 @@ export class ImageRenderer {
     render(info: ImageInfo, options: RenderOptions): void {
         this.currentInfo = info;
         this.rawData = info.data;
+        this.rawView = new DataView(info.data.buffer, info.data.byteOffset, info.data.byteLength);
 
         // Set canvas size
         this.canvas.width = info.width;
@@ -90,8 +94,6 @@ export class ImageRenderer {
 
         // Get pixel size in bytes
         const pixelSize = this.getPixelSize(pixelType);
-        const rowSize = width * channels * pixelSize;
-
         // Calculate normalization range if needed
         let minVal = 0;
         let maxVal = 255;
@@ -108,13 +110,24 @@ export class ImageRenderer {
         } else if (pixelType === 'uint16') {
             minVal = 0;
             maxVal = 65535;
-        } else if (pixelType === 'float32' || pixelType === 'float64') {
+        } else if (pixelType === 'int8') {
+            minVal = -128;
+            maxVal = 127;
+        } else if (pixelType === 'int16') {
+            minVal = -32768;
+            maxVal = 32767;
+        } else if (pixelType === 'int32') {
+            minVal = -2147483648;
+            maxVal = 2147483647;
+        } else if (pixelType === 'float16' || pixelType === 'float32' || pixelType === 'float64') {
             minVal = 0;
             maxVal = 1;
         }
 
         // Single channel view?
-        const singleChannel = options.channelView > 0 ? options.channelView - 1 : -1;
+        const selectedChannel = options.channelView > 0
+            ? this.getRawChannelIndex(info.channelFormat, channels, options.channelView - 1)
+            : undefined;
 
         for (let y = 0; y < height; y++) {
             const rowOffset = y * stride;
@@ -127,7 +140,7 @@ export class ImageRenderer {
                 const values: number[] = [];
                 for (let c = 0; c < channels; c++) {
                     const byteOffset = pixelOffset + c * pixelSize;
-                    let value = this.readPixelValue(data, byteOffset, pixelType);
+                    let value = this.readPixelValue(data, byteOffset, pixelType, info.byteOrder);
 
                     // Normalize
                     value = ((value - minVal) / (maxVal - minVal)) * 255;
@@ -136,9 +149,9 @@ export class ImageRenderer {
                 }
 
                 // Convert to RGBA based on channel count and options
-                if (singleChannel >= 0 && singleChannel < channels) {
+                if (selectedChannel !== undefined) {
                     // Single channel view - grayscale
-                    const v = values[singleChannel];
+                    const v = values[selectedChannel];
                     if (channels === 1 && options.colormap !== 'grayscale') {
                         const color = this.applyColormap(v / 255, options.colormap);
                         output[outOffset] = color[0];
@@ -164,18 +177,24 @@ export class ImageRenderer {
                         output[outOffset + 2] = v;
                     }
                     output[outOffset + 3] = 255;
+                } else if (channels === 2 && info.channelFormat === 'gray-alpha') {
+                    const v = values[0];
+                    output[outOffset] = v;
+                    output[outOffset + 1] = v;
+                    output[outOffset + 2] = v;
+                    output[outOffset + 3] = options.ignoreAlpha ? 255 : values[1];
                 } else if (channels === 3) {
-                    // BGR -> RGB
-                    output[outOffset] = values[2];     // R
-                    output[outOffset + 1] = values[1]; // G
-                    output[outOffset + 2] = values[0]; // B
+                    const isRgb = info.channelFormat === 'rgb';
+                    output[outOffset] = values[isRgb ? 0 : 2];
+                    output[outOffset + 1] = values[1];
+                    output[outOffset + 2] = values[isRgb ? 2 : 0];
                     output[outOffset + 3] = 255;
                 } else if (channels === 4) {
-                    // BGRA -> RGBA
-                    output[outOffset] = values[2];     // R
-                    output[outOffset + 1] = values[1]; // G
-                    output[outOffset + 2] = values[0]; // B
-                    output[outOffset + 3] = options.ignoreAlpha ? 255 : values[3]; // A
+                    const isRgba = info.channelFormat === 'rgba';
+                    output[outOffset] = values[isRgba ? 0 : 2];
+                    output[outOffset + 1] = values[1];
+                    output[outOffset + 2] = values[isRgba ? 2 : 0];
+                    output[outOffset + 3] = options.ignoreAlpha ? 255 : values[3];
                 } else {
                     // Other channel counts - just use first 3
                     output[outOffset] = values[0] ?? 0;
@@ -190,10 +209,17 @@ export class ImageRenderer {
     /**
      * Read a pixel value from the buffer
      */
-    private readPixelValue(data: Uint8Array, offset: number, pixelType: string): number {
-        if (offset < 0 || offset >= data.length) {
+    private readPixelValue(
+        data: Uint8Array,
+        offset: number,
+        pixelType: string,
+        byteOrder: 'little' | 'big'
+    ): number {
+        const pixelSize = this.getPixelSize(pixelType);
+        if (offset < 0 || offset + pixelSize > data.length || !this.rawView) {
             return 0;
         }
+        const littleEndian = byteOrder !== 'big';
 
         switch (pixelType) {
             case 'uint8':
@@ -205,40 +231,59 @@ export class ImageRenderer {
             }
 
             case 'uint16':
-                return data[offset] | (data[offset + 1] << 8);
+                return this.rawView.getUint16(offset, littleEndian);
 
-            case 'int16': {
-                const v = data[offset] | (data[offset + 1] << 8);
-                return v > 32767 ? v - 65536 : v;
-            }
+            case 'int16':
+                return this.rawView.getInt16(offset, littleEndian);
 
-            case 'int32': {
-                const v = data[offset] | (data[offset + 1] << 8) |
-                    (data[offset + 2] << 16) | (data[offset + 3] << 24);
-                return v;
-            }
+            case 'int32':
+                return this.rawView.getInt32(offset, littleEndian);
 
-            case 'float32': {
-                const buffer = new ArrayBuffer(4);
-                const view = new DataView(buffer);
-                for (let i = 0; i < 4; i++) {
-                    view.setUint8(i, data[offset + i]);
-                }
-                return view.getFloat32(0, true);
-            }
+            case 'float32':
+                return this.rawView.getFloat32(offset, littleEndian);
 
-            case 'float64': {
-                const buffer = new ArrayBuffer(8);
-                const view = new DataView(buffer);
-                for (let i = 0; i < 8; i++) {
-                    view.setUint8(i, data[offset + i]);
-                }
-                return view.getFloat64(0, true);
-            }
+            case 'float64':
+                return this.rawView.getFloat64(offset, littleEndian);
+
+            case 'float16':
+                return this.decodeFloat16(this.rawView.getUint16(offset, littleEndian));
 
             default:
                 return data[offset];
         }
+    }
+
+    private decodeFloat16(value: number): number {
+        const sign = (value & 0x8000) !== 0 ? -1 : 1;
+        const exponent = (value >> 10) & 0x1f;
+        const fraction = value & 0x03ff;
+
+        if (exponent === 0) {
+            return sign * Math.pow(2, -14) * (fraction / 1024);
+        }
+        if (exponent === 0x1f) {
+            return fraction === 0 ? sign * Infinity : NaN;
+        }
+        return sign * Math.pow(2, exponent - 15) * (1 + fraction / 1024);
+    }
+
+    /** Map UI channel order (R, G, B, A) to the raw buffer channel index. */
+    private getRawChannelIndex(
+        channelFormat: string | undefined,
+        channels: number,
+        displayChannel: number
+    ): number | undefined {
+        if (channels === 1) {
+            return displayChannel === 0 ? 0 : undefined;
+        }
+        if (channelFormat === 'gray-alpha') {
+            return displayChannel === 0 ? 0 : displayChannel === 3 ? 1 : undefined;
+        }
+
+        const isBlueFirst = channelFormat !== 'rgb' && channelFormat !== 'rgba';
+        const map = isBlueFirst ? [2, 1, 0, 3] : [0, 1, 2, 3];
+        const rawIndex = map[displayChannel];
+        return rawIndex < channels ? rawIndex : undefined;
     }
 
     /**
@@ -286,12 +331,19 @@ export class ImageRenderer {
             const rowOffset = y * stride;
             for (let x = 0; x < width; x++) {
                 count++;
-                if (count % sampleStep !== 0) continue;
+                if (count % sampleStep !== 0) {
+                    continue;
+                }
 
                 const pixelOffset = rowOffset + x * channels * pixelSize;
                 for (let c = 0; c < channels; c++) {
                     const byteOffset = pixelOffset + c * pixelSize;
-                    const value = this.readPixelValue(data, byteOffset, pixelType);
+                    const value = this.readPixelValue(
+                        data,
+                        byteOffset,
+                        pixelType,
+                        this.currentInfo?.byteOrder ?? 'little'
+                    );
                     if (isFinite(value)) {
                         min = Math.min(min, value);
                         max = Math.max(max, value);
@@ -300,8 +352,12 @@ export class ImageRenderer {
             }
         }
 
-        if (!isFinite(min)) min = 0;
-        if (!isFinite(max)) max = 1;
+        if (!isFinite(min)) {
+            min = 0;
+        }
+        if (!isFinite(max)) {
+            max = 1;
+        }
 
         return { min, max };
     }
@@ -336,7 +392,7 @@ export class ImageRenderer {
         const values: number[] = [];
         for (let c = 0; c < channels; c++) {
             const byteOffset = pixelOffset + c * pixelSize;
-            values.push(this.readPixelValue(this.rawData, byteOffset, pixelType));
+            values.push(this.readPixelValue(this.rawData, byteOffset, pixelType, this.currentInfo.byteOrder));
         }
 
         return values;
@@ -357,5 +413,6 @@ export class ImageRenderer {
         this.imageData = null;
         this.currentInfo = null;
         this.rawData = null;
+        this.rawView = null;
     }
 }

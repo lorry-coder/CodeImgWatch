@@ -20,8 +20,11 @@ A VS Code extension for visualizing image data during C/C++ and Python debugging
 
 ## Supported Platforms
 
-- Windows x86/x64
-- Linux x86/x64
+- Windows x64/ARM64
+- macOS x64/Apple silicon
+- Linux x64/ARM64
+
+The extension itself is platform-neutral TypeScript. Native debugger and Python package support still depends on the debugger extension and interpreter installed on the target machine.
 
 ## Supported Image Types
 
@@ -43,7 +46,7 @@ A VS Code extension for visualizing image data during C/C++ and Python debugging
 |------|--------|-------------|
 | `numpy.ndarray` | NumPy, OpenCV-Python, scikit-image | Most common image format in Python |
 | `PIL.Image.Image` | Pillow | Python Imaging Library |
-| `torch.Tensor` | PyTorch | Deep learning tensors (CPU only) |
+| `torch.Tensor` | PyTorch | CPU and accelerator tensors (copied to CPU for display) |
 
 ## Supported Pixel Depths
 
@@ -56,6 +59,7 @@ A VS Code extension for visualizing image data during C/C++ and Python debugging
 | CV_32S | 32-bit signed integer |
 | CV_32F | 32-bit float |
 | CV_64F | 64-bit float |
+| CV_16F | 16-bit float |
 
 ## Usage
 
@@ -152,6 +156,8 @@ Operators can be nested: `@abs(@diff(img1, img2))`
 | `imview.autoRefresh` | `true` | Refresh images when debugger stops |
 | `imview.defaultColormap` | `grayscale` | Default colormap for single-channel images |
 | `imview.maxImageSize` | `4096` | Maximum image dimension |
+| `imview.maxImageBytes` | `268435456` | Maximum debugger transfer size (256 MiB) |
+| `imview.numpyChannelOrder` | `bgr` | Treat 3/4-channel NumPy arrays as OpenCV BGR/BGRA or RGB/RGBA |
 | `imview.showPixelGrid` | `true` | Show pixel grid when zoomed in |
 | `imview.pixelGridZoomThreshold` | `8` | Minimum zoom to show pixel grid |
 | `imview.autoNormalize` | `true` | Auto-normalize values for display |
@@ -192,28 +198,28 @@ Supported `pixelType` values: `uint8`, `int8`, `uint16`, `int16`, `int32`, `floa
 ### From VSIX
 
 ```bash
-code --install-extension imview-0.1.0.vsix
+code --install-extension imview-0.1.1.vsix
 ```
 
 ### Building from Source
 
 ```bash
 # Install dependencies
-npm install
+npm ci
 
 # Compile
 npm run compile
 
-# Package
-npx vsce package --allow-missing-repository
+# Package a validated VSIX
+npm run package:vsix
 ```
 
 ## Known Limitations
 
-- Large images (>16384 pixels in either dimension) may cause performance issues
+- Image dimensions and transfer size are bounded by `imview.maxImageSize` and `imview.maxImageBytes`
 - Some debugger configurations may not support `readMemory` requests
 - PNG/JPG export is not fully implemented (use binary export instead)
-- **Python**: PyTorch tensors must be on CPU (use `.cpu()` to move GPU tensors)
+- **Python**: Accelerator-backed PyTorch tensors are copied to CPU and may pause longer for large tensors
 - **Python**: Very large images may take longer to transfer due to base64 encoding
 
 ## Troubleshooting

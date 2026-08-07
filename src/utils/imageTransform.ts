@@ -8,7 +8,12 @@ import { ImageMetadata, PixelDepth, PixelDepthSize } from '../types';
  * Calculate actual data size for an image
  */
 export function calculateDataSize(metadata: ImageMetadata): number {
-    return metadata.stride * metadata.height;
+    if (metadata.height <= 0) {
+        return 0;
+    }
+
+    const rowSize = calculateMinStride(metadata.width, metadata.channels, metadata.depth);
+    return (metadata.height - 1) * metadata.stride + rowSize;
 }
 
 /**

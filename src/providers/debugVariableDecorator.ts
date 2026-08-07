@@ -2,6 +2,20 @@ import * as vscode from 'vscode';
 import { DebugSessionManager } from '../core/debugSessionManager';
 import { isKnownImageType, normalizeTypeName } from '../parsers/baseParser';
 
+interface DapVariable {
+    name: string;
+    type?: string;
+    evaluateName?: string;
+}
+
+interface DapMessage {
+    type?: string;
+    command?: string;
+    body?: {
+        variables?: DapVariable[];
+    };
+}
+
 /**
  * Provides inline decorations for image variables in the debug view
  */
@@ -110,18 +124,22 @@ export class DebugVariableDecorator implements vscode.Disposable {
 export class ImageWatchDebugAdapterTracker implements vscode.DebugAdapterTracker {
     private imageVariableNames: Set<string> = new Set();
 
-    onWillReceiveMessage(message: any): void {
+    onWillReceiveMessage(): void {
         // Could intercept requests here if needed
     }
 
-    onDidSendMessage(message: any): void {
+    onDidSendMessage(message: unknown): void {
+        if (typeof message !== 'object' || message === null) {
+            return;
+        }
+        const dapMessage = message as DapMessage;
         // Intercept variable responses to detect image types
-        if (message.type === 'response' && message.command === 'variables') {
-            this.processVariables(message.body?.variables || []);
+        if (dapMessage.type === 'response' && dapMessage.command === 'variables') {
+            this.processVariables(dapMessage.body?.variables ?? []);
         }
     }
 
-    private processVariables(variables: any[]): void {
+    private processVariables(variables: DapVariable[]): void {
         for (const v of variables) {
             const typeName = v.type ?? '';
             const normalizedType = normalizeTypeName(typeName);

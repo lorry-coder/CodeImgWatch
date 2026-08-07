@@ -87,7 +87,7 @@ npm run watch
 ### 4. 打包
 
 ```bash
-npx vsce package --allow-missing-repository
+npm run package:vsix
 ```
 
 ---
@@ -311,9 +311,25 @@ function decodeCvType(type: number) {
 ### 运行单元测试
 
 ```bash
-npm run compile-tests
 npm test
 ```
+
+`npm test` 会重新编译扩展与测试，并在 VS Code Extension Host 中运行 Mocha。`npm run lint` 检查 `src/`、`webview/` 和 `test/`。
+
+### 运行真实调试器集成测试
+
+真实 debugpy/GDB 测试默认跳过。先编译 OpenCV 示例，再通过环境变量提供调试扩展目录、Python 和示例程序：
+
+```bash
+g++ -g -O0 -o /tmp/imview-opencv samples/test_opencv.cpp $(pkg-config --cflags --libs opencv4)
+IMVIEW_RUN_DEBUG_INTEGRATION=1 \
+IMVIEW_PYTHON_PATH=python3 \
+IMVIEW_CPP_SAMPLE=/tmp/imview-opencv \
+IMVIEW_TEST_EXTENSION_PATHS="<debugpy-path>:<cpptools-path>" \
+npm test
+```
+
+在 Windows 上，`IMVIEW_TEST_EXTENSION_PATHS` 使用分号分隔路径。跨平台编译、lint 和生产打包由 `.github/workflows/ci.yml` 在 Windows、macOS、Linux 上执行。
 
 ### 测试用 C++ 程序
 
@@ -339,7 +355,7 @@ npm test
 1. 更新 `package.json` 版本号
 2. 更新 `docs/USER_MANUAL.md` 更新日志
 3. 运行测试确保通过
-4. 打包：`npx vsce package`
+4. 打包：`npm run package:vsix`
 5. 测试 VSIX 安装
 6. 发布到 Marketplace（可选）
 

@@ -1,4 +1,3 @@
-import { DebugSessionManager, EvaluateResponse } from '../core/debugSessionManager';
 import { BaseImageParser } from './baseParser';
 import { ParseResult, ImageMetadata, PixelDepth, PixelDepthSize, PixelDepthName } from '../types';
 
@@ -24,7 +23,7 @@ export class RawArrayParser extends BaseImageParser {
     readonly name = 'RawArray';
     readonly priority = 10; // Low priority, only for explicit @mem
 
-    canParse(typeName: string): boolean {
+    canParse(): boolean {
         // This parser is invoked directly, not by type matching
         return false;
     }
@@ -129,11 +128,7 @@ export class RawArrayParser extends BaseImageParser {
         return typeMap[normalized];
     }
 
-    async parse(
-        session: DebugSessionManager,
-        expression: string,
-        evaluateResult: EvaluateResponse
-    ): Promise<ParseResult> {
+    async parse(): Promise<ParseResult> {
         // This method is called when we need to create metadata from a RawImageSpec
         return this.errorResult('RawArrayParser.parse should not be called directly');
     }

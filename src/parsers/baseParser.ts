@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { DebugSessionManager, EvaluateResponse, VariableInfo } from '../core/debugSessionManager';
-import { ImageMetadata, ParseResult, DebuggerType } from '../types';
+import { ImageMetadata, ParseResult, PixelDepth, PixelDepthSize } from '../types';
 
 /**
  * Interface for image type parsers
@@ -208,10 +208,62 @@ export abstract class BaseImageParser implements IImageParser {
     ): Promise<string | undefined> {
         const result = await this.evaluateExpression(session, expression);
         if (result) {
-            if (result.memoryReference) {
-                return result.memoryReference;
+            const pointerValue = this.parsePointerValue(result.result);
+            if (pointerValue) {
+                return pointerValue;
             }
-            return this.parsePointerValue(result.result);
+            return result.memoryReference;
+        }
+        return undefined;
+    }
+
+    /** Build member access for values/references and pointer expressions. */
+    protected getMemberExpression(expression: string, typeName: string, memberName: string): string {
+        const access = /\*(?:\s+const)?\s*$/.test(typeName.trim()) ? '->' : '.';
+        return `(${expression})${access}${memberName}`;
+    }
+
+    /** Validate dimensions and allocation size before requesting debuggee memory. */
+    protected getImageValidationError(
+        width: number,
+        height: number,
+        channels: number,
+        depth: PixelDepth,
+        stride: number
+    ): string | undefined {
+        const config = vscode.workspace.getConfiguration('imview');
+        const configuredMaxDimension = config.get<number>('maxImageSize', 4096);
+        const maxDimension = Number.isFinite(configuredMaxDimension) && configuredMaxDimension > 0
+            ? Math.floor(configuredMaxDimension)
+            : 4096;
+        const configuredMaxBytes = config.get<number>('maxImageBytes', 256 * 1024 * 1024);
+        const maxBytes = Number.isFinite(configuredMaxBytes) && configuredMaxBytes > 0
+            ? Math.floor(configuredMaxBytes)
+            : 256 * 1024 * 1024;
+
+        if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) {
+            return `Invalid image dimensions: ${width}x${height}`;
+        }
+        if (width > maxDimension || height > maxDimension) {
+            return `Image dimensions ${width}x${height} exceed imview.maxImageSize (${maxDimension})`;
+        }
+        if (!Number.isSafeInteger(channels) || channels < 1 || channels > 4) {
+            return `Unsupported channel count: ${channels} (expected 1-4)`;
+        }
+
+        const bytesPerElement = PixelDepthSize[depth];
+        if (!bytesPerElement) {
+            return `Unsupported pixel depth: ${depth}`;
+        }
+
+        const rowSize = width * channels * bytesPerElement;
+        if (!Number.isSafeInteger(stride) || stride < rowSize) {
+            return `Invalid row stride: ${stride} bytes (minimum ${rowSize})`;
+        }
+
+        const dataSize = (height - 1) * stride + rowSize;
+        if (!Number.isSafeInteger(dataSize) || dataSize <= 0 || dataSize > maxBytes) {
+            return `Image requires ${dataSize} bytes; imview.maxImageBytes is ${maxBytes}`;
         }
         return undefined;
     }
@@ -254,7 +306,6 @@ export function isKnownImageType(typeName: string): boolean {
         /cv::Mat\b/,
         /cv::Mat_</,
         /cv::Matx</,
-        /cv::UMat\b/,
         /\bCvMat\b/,
         /\bIplImage\b/,
         // Python image types

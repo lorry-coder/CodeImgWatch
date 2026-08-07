@@ -10,8 +10,12 @@ async function main() {
         const extensionTestsPath = path.resolve(__dirname, './suite/index');
 
         // Download VS Code, unzip it and run the integration test
+        const extraExtensionPaths = (process.env.IMVIEW_TEST_EXTENSION_PATHS ?? '')
+            .split(path.delimiter)
+            .filter(Boolean);
+
         await runTests({
-            extensionDevelopmentPath,
+            extensionDevelopmentPath: [extensionDevelopmentPath, ...extraExtensionPaths],
             extensionTestsPath,
         });
     } catch (err) {

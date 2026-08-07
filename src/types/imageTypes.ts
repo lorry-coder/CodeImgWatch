@@ -1,4 +1,4 @@
-import { PixelDepth, ChannelFormat } from './pixelFormats';
+import { PixelDepth, ChannelFormat, ByteOrder } from './pixelFormats';
 
 /**
  * Supported debugger types
@@ -61,6 +61,9 @@ export interface ImageMetadata {
 
     /** Channel format hint */
     channelFormat?: ChannelFormat;
+
+    /** Byte order for multi-byte values (supported desktop targets are little-endian by default) */
+    byteOrder?: ByteOrder;
 
     /** Whether data is continuous in memory */
     isContinuous?: boolean;

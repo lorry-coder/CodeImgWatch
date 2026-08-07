@@ -1,12 +1,12 @@
 import * as vscode from 'vscode';
 import { DebugSessionManager } from '../core/debugSessionManager';
-import { ImageItem, ImageMetadata, DisplayOptions, DefaultDisplayOptions, ImageTypeName } from '../types';
+import { readImageDataForDisplay } from '../core/imageDataReader';
+import { ImageItem, DisplayOptions, DefaultDisplayOptions } from '../types';
 import {
     ExtensionToWebviewMessage,
     WebviewToExtensionMessage,
     createDisplayImageMessage,
 } from '../types/messages';
-import { chwToHwc } from '../utils/imageTransform';
 
 /**
  * Manager for image editor panels (separate tab windows)
@@ -14,6 +14,7 @@ import { chwToHwc } from '../utils/imageTransform';
 export class ImageEditorManager implements vscode.Disposable {
     private disposables: vscode.Disposable[] = [];
     private panels: Map<string, vscode.WebviewPanel> = new Map();
+    private panelItems: Map<string, ImageItem> = new Map();
     private sessionManager: DebugSessionManager;
     private displayOptions: DisplayOptions;
 
@@ -47,6 +48,14 @@ export class ImageEditorManager implements vscode.Disposable {
         };
     }
 
+    /** Reload workspace display settings and update all editor webviews. */
+    reloadConfiguration(): void {
+        this.loadDisplayOptions();
+        for (const panel of this.panels.values()) {
+            this.postMessage(panel, { command: 'updateOptions', options: this.displayOptions });
+        }
+    }
+
     /**
      * Open an image in a new editor tab
      */
@@ -54,6 +63,7 @@ export class ImageEditorManager implements vscode.Disposable {
         // Track for A/B comparison
         this.previousImage = this.currentImage;
         this.currentImage = item;
+        this.panelItems.set(item.id, item);
 
         // Check if panel already exists
         const existingPanel = this.panels.get(item.id);
@@ -83,6 +93,7 @@ export class ImageEditorManager implements vscode.Disposable {
         // Handle panel disposal
         panel.onDidDispose(() => {
             this.panels.delete(item.id);
+            this.panelItems.delete(item.id);
         });
 
         // Handle messages from webview
@@ -133,7 +144,7 @@ export class ImageEditorManager implements vscode.Disposable {
                 break;
 
             case 'toggleCompare':
-                this.toggleABCompare(panel, panelId);
+                this.toggleABCompare(panel);
                 break;
 
             case 'optionsChanged':
@@ -161,19 +172,8 @@ export class ImageEditorManager implements vscode.Disposable {
                 return;
             }
 
-            // Read image data based on debugger type
-            let data: Uint8Array | undefined;
-
-            if (item.metadata.debuggerType === 'debugpy') {
-                data = await this.readPythonImageData(item.metadata);
-            } else {
-                data = await this.sessionManager.readMemoryChunked(
-                    item.metadata.dataAddress,
-                    item.metadata.dataSize
-                );
-            }
-
-            if (!data) {
+            const image = await readImageDataForDisplay(this.sessionManager, item.metadata);
+            if (!image) {
                 this.postMessage(panel, {
                     command: 'showError',
                     message: 'Failed to read image data from memory',
@@ -181,22 +181,8 @@ export class ImageEditorManager implements vscode.Disposable {
                 return;
             }
 
-            // Handle CHW to HWC conversion for PyTorch tensors
-            if (item.metadata.dataLayout === 'CHW' && item.metadata.channels > 1) {
-                data = chwToHwc(
-                    data,
-                    item.metadata.channels,
-                    item.metadata.height,
-                    item.metadata.width,
-                    this.getBytesPerElement(item.metadata.depth)
-                );
-                // Update metadata to reflect the conversion
-                item.metadata.dataLayout = 'HWC';
-                item.metadata.stride = item.metadata.width * item.metadata.channels * this.getBytesPerElement(item.metadata.depth);
-            }
-
-            const base64 = this.arrayToBase64(data);
-            const message = createDisplayImageMessage(item.metadata, base64);
+            const base64 = this.arrayToBase64(image.data);
+            const message = createDisplayImageMessage(image.metadata, base64);
             this.postMessage(panel, message);
         } catch (error) {
             this.postMessage(panel, {
@@ -209,48 +195,9 @@ export class ImageEditorManager implements vscode.Disposable {
     }
 
     /**
-     * Read image data from Python debugger (debugpy)
-     */
-    private async readPythonImageData(metadata: ImageMetadata): Promise<Uint8Array | undefined> {
-        const expression = metadata.expression;
-
-        // Build the appropriate expression based on image type
-        let dataExpression: string;
-
-        if (metadata.typeName === ImageTypeName.PIL_IMAGE) {
-            // Convert PIL image to numpy array first
-            dataExpression = `__import__('numpy').array(${expression})`;
-        } else if (metadata.typeName === ImageTypeName.TORCH_TENSOR) {
-            // Convert torch tensor to numpy
-            // Need to handle CHW format and ensure contiguous
-            if (metadata.dataLayout === 'CHW' && metadata.channels > 1) {
-                // Permute CHW to HWC, then convert to numpy
-                dataExpression = `${expression}.permute(1, 2, 0).contiguous().numpy()`;
-            } else {
-                dataExpression = `${expression}.contiguous().numpy()`;
-            }
-            // Mark that we've already done the conversion
-            metadata.dataLayout = 'HWC';
-        } else {
-            // numpy array - ensure contiguous
-            dataExpression = `__import__('numpy').ascontiguousarray(${expression})`;
-        }
-
-        return this.sessionManager.readPythonArrayData(dataExpression, false);
-    }
-
-    /**
-     * Get bytes per element for a given depth
-     */
-    private getBytesPerElement(depth: number): number {
-        const sizes = [1, 1, 2, 2, 4, 4, 8, 2]; // CV_8U, CV_8S, CV_16U, CV_16S, CV_32S, CV_32F, CV_64F, CV_16F
-        return sizes[depth] ?? 1;
-    }
-
-    /**
      * Toggle A/B comparison (switch to previous image)
      */
-    private async toggleABCompare(panel: vscode.WebviewPanel, currentId: string): Promise<void> {
+    private async toggleABCompare(panel: vscode.WebviewPanel): Promise<void> {
         if (!this.previousImage || !this.previousImage.metadata) {
             vscode.window.showInformationMessage('No previous image for comparison');
             return;
@@ -294,14 +241,13 @@ export class ImageEditorManager implements vscode.Disposable {
         }
 
         try {
-            const data = await this.sessionManager.readMemoryChunked(meta.dataAddress, meta.dataSize);
-
-            if (!data) {
+            const image = await readImageDataForDisplay(this.sessionManager, meta);
+            if (!image) {
                 throw new Error('Failed to read image data');
             }
 
             if (format === 'bin') {
-                await vscode.workspace.fs.writeFile(uri, data);
+                await vscode.workspace.fs.writeFile(uri, image.data);
                 vscode.window.showInformationMessage(`Image exported to ${uri.fsPath}`);
             } else {
                 vscode.window.showWarningMessage('PNG/JPG export requires webview rendering');
@@ -342,27 +288,21 @@ export class ImageEditorManager implements vscode.Disposable {
             panel.dispose();
         }
         this.panels.clear();
+        this.panelItems.clear();
     }
 
     /**
      * Find item by panel ID
      */
     private findItemById(id: string): ImageItem | undefined {
-        // This would need to be connected to ImageListProvider
-        // For now, check current/previous
-        if (this.currentImage?.id === id) {
-            return this.currentImage;
-        }
-        if (this.previousImage?.id === id) {
-            return this.previousImage;
-        }
-        return undefined;
+        return this.panelItems.get(id);
     }
 
     /**
      * Set item reference for a panel
      */
     setItemForPanel(id: string, item: ImageItem): void {
+        this.panelItems.set(id, item);
         if (this.currentImage?.id === id) {
             this.currentImage = item;
         }
@@ -373,11 +313,7 @@ export class ImageEditorManager implements vscode.Disposable {
     }
 
     private arrayToBase64(data: Uint8Array): string {
-        let binary = '';
-        for (let i = 0; i < data.length; i++) {
-            binary += String.fromCharCode(data[i]);
-        }
-        return btoa(binary);
+        return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('base64');
     }
 
     private getHtmlForWebview(webview: vscode.Webview, item: ImageItem): string {

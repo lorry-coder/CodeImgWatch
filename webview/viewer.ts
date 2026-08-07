@@ -36,6 +36,8 @@ interface DisplayImageMessage {
     channels: number;
     pixelType: string;
     stride: number;
+    channelFormat?: string;
+    byteOrder: 'little' | 'big';
     name: string;
     typeName: string;
 }
@@ -298,6 +300,8 @@ class ImageViewer {
             channels: message.channels,
             pixelType: message.pixelType,
             stride: message.stride,
+            channelFormat: message.channelFormat,
+            byteOrder: message.byteOrder,
             name: message.name,
             typeName: message.typeName,
         };
