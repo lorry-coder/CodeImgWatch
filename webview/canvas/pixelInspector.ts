@@ -1,6 +1,31 @@
 import { ImageRenderer } from './imageRenderer';
 import { ZoomController } from './zoomController';
 
+const INTEGER_HEX_WIDTHS: Readonly<Record<string, number>> = {
+    int8: 2,
+    uint8: 2,
+    int16: 4,
+    uint16: 4,
+    int32: 8,
+};
+
+/**
+ * Format an integer pixel value using its storage width.
+ * Negative signed values are represented using two's-complement notation.
+ */
+export function formatIntegerHex(value: number, pixelType: string): string {
+    const width = INTEGER_HEX_WIDTHS[pixelType];
+    const roundedValue = Math.round(value);
+
+    if (width === undefined || !Number.isFinite(roundedValue)) {
+        return roundedValue.toString(16).toUpperCase();
+    }
+
+    const modulus = 2 ** (width * 4);
+    const unsignedValue = ((roundedValue % modulus) + modulus) % modulus;
+    return unsignedValue.toString(16).padStart(width, '0').toUpperCase();
+}
+
 /**
  * Pixel inspector for displaying pixel values
  */
@@ -110,7 +135,7 @@ export class PixelInspector {
             const channelName = channelNames[i] ?? `C${i}`;
 
             if (this.displayFormat === 'hex' && !isFloat) {
-                const hex = Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0').toUpperCase();
+                const hex = formatIntegerHex(v, pixelType);
                 return `${channelName}:0x${hex}`;
             } else if (isFloat) {
                 return `${channelName}:${v.toFixed(4)}`;
@@ -129,8 +154,7 @@ export class PixelInspector {
         const isFloat = pixelType.startsWith('float');
 
         if (this.displayFormat === 'hex' && !isFloat) {
-            const v = Math.max(0, Math.min(255, Math.round(value)));
-            return v.toString(16).padStart(2, '0').toUpperCase();
+            return formatIntegerHex(value, pixelType);
         } else if (isFloat) {
             return value.toFixed(2);
         } else {

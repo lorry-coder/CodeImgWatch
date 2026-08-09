@@ -56,6 +56,7 @@ export class DebugSessionManager implements vscode.Disposable {
     private _currentThreadId: number | undefined;
     private _currentFrameId: number | undefined;
     private _isPaused: boolean = false;
+    private lastStopKey?: string;
 
     private readonly _onDidChangeSession = new vscode.EventEmitter<vscode.DebugSession | undefined>();
     private readonly _onDidStopOnBreakpoint = new vscode.EventEmitter<StackFrameChangedEvent>();
@@ -80,9 +81,9 @@ export class DebugSessionManager implements vscode.Disposable {
         // Listen for debug session changes
         this.disposables.push(
             vscode.debug.onDidStartDebugSession(session => {
-                if (this.isSupportedDebugger(session.type)) {
-                    this._activeSession = session;
-                    this._onDidChangeSession.fire(session);
+                if (this.isSupportedDebugger(session.type) &&
+                    (!this._activeSession || vscode.debug.activeDebugSession?.id === session.id)) {
+                    this.changeActiveSession(session);
                 }
             })
         );
@@ -90,11 +91,7 @@ export class DebugSessionManager implements vscode.Disposable {
         this.disposables.push(
             vscode.debug.onDidTerminateDebugSession(session => {
                 if (this._activeSession === session) {
-                    this._activeSession = undefined;
-                    this._currentThreadId = undefined;
-                    this._currentFrameId = undefined;
-                    this._isPaused = false;
-                    this._onDidChangeSession.fire(undefined);
+                    this.changeActiveSession(undefined);
                 }
             })
         );
@@ -103,8 +100,9 @@ export class DebugSessionManager implements vscode.Disposable {
         this.disposables.push(
             vscode.debug.onDidChangeActiveDebugSession(session => {
                 if (session && this.isSupportedDebugger(session.type)) {
-                    this._activeSession = session;
-                    this._onDidChangeSession.fire(session);
+                    this.changeActiveSession(session);
+                } else {
+                    this.changeActiveSession(undefined);
                 }
             })
         );
@@ -112,12 +110,10 @@ export class DebugSessionManager implements vscode.Disposable {
         // Listen for stopped events (breakpoints, step, etc.)
         this.disposables.push(
             vscode.debug.onDidReceiveDebugSessionCustomEvent(event => {
-                if (event.event === 'stopped' && event.session === this._activeSession) {
-                    this._isPaused = true;
-                    this.handleStoppedEvent(event.body);
-                } else if (event.event === 'continued' && event.session === this._activeSession) {
-                    this._isPaused = false;
-                    this._onDidContinue.fire(event.session);
+                if (event.event === 'stopped') {
+                    void this.handleAdapterStopped(event.session, event.body ?? {});
+                } else if (event.event === 'continued') {
+                    this.handleAdapterContinued(event.session, event.body ?? {});
                 }
             })
         );
@@ -125,62 +121,138 @@ export class DebugSessionManager implements vscode.Disposable {
         // Listen for stack frame changes - most reliable way to detect paused state
         this.disposables.push(
             vscode.debug.onDidChangeActiveStackItem(item => {
-                if (item && this._activeSession) {
-                    this._isPaused = true;
-
-                    if ('frameId' in item) {
-                        const frame = item as { frameId: number; threadId: number };
-                        this._currentFrameId = frame.frameId;
-                        this._currentThreadId = frame.threadId;
-
-                        this._onDidStopOnBreakpoint.fire({
-                            session: this._activeSession,
-                            threadId: frame.threadId,
-                            frameId: frame.frameId,
-                        });
+                if (!item) {
+                    if (this._activeSession) {
+                        this.handleAdapterContinued(this._activeSession);
                     }
+                    return;
+                }
+                if (!this.isSupportedDebugger(item.session.type)) {
+                    return;
+                }
+                if (this._activeSession?.id !== item.session.id) {
+                    this.changeActiveSession(item.session);
+                }
+
+                this._isPaused = true;
+                this._currentThreadId = item.threadId;
+                if ('frameId' in item) {
+                    this._currentFrameId = item.frameId;
+                    this.emitStopped(item.session, item.threadId, item.frameId);
                 }
             })
         );
 
         // Set initial active session if one exists
         if (vscode.debug.activeDebugSession && this.isSupportedDebugger(vscode.debug.activeDebugSession.type)) {
-            this._activeSession = vscode.debug.activeDebugSession;
+            this.changeActiveSession(vscode.debug.activeDebugSession);
             if (vscode.debug.activeStackItem) {
                 this._isPaused = true;
             }
         }
     }
 
-    private async handleStoppedEvent(body: { threadId?: number; allThreadsStopped?: boolean }): Promise<void> {
-        if (!this._activeSession) {
+    private changeActiveSession(session: vscode.DebugSession | undefined): void {
+        if (this._activeSession?.id === session?.id) {
             return;
         }
+        this._activeSession = session;
+        this._currentThreadId = undefined;
+        this._currentFrameId = undefined;
+        this._isPaused = false;
+        this.lastStopKey = undefined;
+        this._onDidChangeSession.fire(session);
+    }
 
-        const threadId = body.threadId ?? 1;
-        this._currentThreadId = threadId;
+    /** Receive a standard DAP stopped event from the registered adapter tracker. */
+    public async handleAdapterStopped(
+        session: vscode.DebugSession,
+        body: { threadId?: number; allThreadsStopped?: boolean }
+    ): Promise<void> {
+        if (!this.isSupportedDebugger(session.type)) {
+            return;
+        }
+        if (this._activeSession?.id !== session.id) {
+            if (vscode.debug.activeDebugSession?.id !== session.id) {
+                return;
+            }
+            this.changeActiveSession(session);
+        }
+
+        this._isPaused = true;
 
         try {
+            let threadId = body.threadId;
+            if (threadId === undefined) {
+                const activeStackItem = vscode.debug.activeStackItem;
+                if (activeStackItem?.session.id === session.id) {
+                    threadId = activeStackItem.threadId;
+                } else {
+                    const threadsResponse = await session.customRequest('threads', {});
+                    if (this._activeSession?.id !== session.id || !this._isPaused) {
+                        return;
+                    }
+                    threadId = threadsResponse.threads?.[0]?.id;
+                }
+            }
+            if (threadId === undefined || !Number.isInteger(threadId)) {
+                console.error('[ImView] Stopped event did not identify a usable thread');
+                return;
+            }
+            this._currentThreadId = threadId;
+
             // Get the current stack frame
-            const stackResponse = await this._activeSession.customRequest('stackTrace', {
+            const stackResponse = await session.customRequest('stackTrace', {
                 threadId,
                 startFrame: 0,
                 levels: 1,
             });
 
+            if (this._activeSession?.id !== session.id || !this._isPaused) {
+                return;
+            }
+
             if (stackResponse.stackFrames && stackResponse.stackFrames.length > 0) {
                 const frame = stackResponse.stackFrames[0];
                 this._currentFrameId = frame.id;
-
-                this._onDidStopOnBreakpoint.fire({
-                    session: this._activeSession,
-                    threadId,
-                    frameId: frame.id,
-                });
+                this.emitStopped(session, threadId, frame.id);
             }
         } catch (error) {
             console.error('Failed to get stack trace:', error);
         }
+    }
+
+    /** Receive a standard DAP continued event from the registered adapter tracker. */
+    public handleAdapterContinued(
+        session: vscode.DebugSession,
+        body: { threadId?: number; allThreadsContinued?: boolean } = {}
+    ): void {
+        if (this._activeSession?.id !== session.id) {
+            return;
+        }
+        if (this._currentThreadId !== undefined &&
+            body.threadId !== undefined &&
+            body.threadId !== this._currentThreadId &&
+            body.allThreadsContinued !== true) {
+            return;
+        }
+        const wasPaused = this._isPaused || this._currentFrameId !== undefined;
+        this._isPaused = false;
+        this._currentThreadId = undefined;
+        this._currentFrameId = undefined;
+        this.lastStopKey = undefined;
+        if (wasPaused) {
+            this._onDidContinue.fire(session);
+        }
+    }
+
+    private emitStopped(session: vscode.DebugSession, threadId: number, frameId: number): void {
+        const key = `${session.id}:${threadId}:${frameId}`;
+        if (this.lastStopKey === key) {
+            return;
+        }
+        this.lastStopKey = key;
+        this._onDidStopOnBreakpoint.fire({ session, threadId, frameId });
     }
 
     /**
@@ -238,36 +310,17 @@ export class DebugSessionManager implements vscode.Disposable {
         return this._currentFrameId;
     }
 
-    /**
-     * Check if debugger is paused
-     * Uses multiple methods to detect paused state
-     */
+    /** Check whether a standard adapter/stack event has put the active session in a paused state. */
     public get isPaused(): boolean {
-        // Method 1: Check our internal flag
-        if (this._isPaused) {
-            return true;
-        }
-
-        // Method 2: Check if there's an active stack item (most reliable)
-        if (vscode.debug.activeStackItem) {
-            this._isPaused = true;
-            return true;
-        }
-
-        // Method 3: Check if we have a valid frame ID
-        if (this._currentFrameId !== undefined && this._activeSession) {
-            return true;
-        }
-
-        return false;
+        return this._isPaused;
     }
 
     /**
      * Evaluate an expression in the current context
      */
     public async evaluate(expression: string, context: 'watch' | 'repl' | 'hover' = 'watch'): Promise<EvaluateResponse | undefined> {
-        if (!this._activeSession) {
-            console.error('[ImView] evaluate: No active session');
+        if (!this._activeSession || !this.isPaused) {
+            console.error('[ImView] evaluate: No paused active session');
             return undefined;
         }
 
@@ -276,16 +329,27 @@ export class DebugSessionManager implements vscode.Disposable {
             await this.tryGetCurrentFrame();
         }
 
-        if (this._currentFrameId === undefined) {
+        const session = this._activeSession;
+        const frameId = this._currentFrameId;
+        if (frameId === undefined || !this._isPaused) {
             console.error('[ImView] evaluate: No frame ID available');
             return undefined;
         }
 
+        return this.evaluateInContext(session, frameId, expression, context);
+    }
+
+    private async evaluateInContext(
+        session: vscode.DebugSession,
+        frameId: number,
+        expression: string,
+        context: 'watch' | 'repl' | 'hover'
+    ): Promise<EvaluateResponse | undefined> {
         try {
-            console.log(`[ImView] Evaluating (context=${context}, frameId=${this._currentFrameId}): ${expression.substring(0, 100)}...`);
-            const response = await this._activeSession.customRequest('evaluate', {
+            console.log(`[ImView] Evaluating (context=${context}, frameId=${frameId}): ${expression.substring(0, 100)}...`);
+            const response = await session.customRequest('evaluate', {
                 expression,
-                frameId: this._currentFrameId,
+                frameId,
                 context,
             });
             console.log(`[ImView] Evaluate response: result=${response?.result?.substring(0, 100)}...`);
@@ -300,38 +364,43 @@ export class DebugSessionManager implements vscode.Disposable {
      * Try to get the current stack frame if we don't have one
      */
     private async tryGetCurrentFrame(): Promise<void> {
-        if (!this._activeSession) {
+        const session = this._activeSession;
+        if (!session || !this._isPaused) {
             return;
         }
+        const captureIsCurrent = (): boolean =>
+            this._activeSession?.id === session.id && this._isPaused;
 
         // Check if there's an active stack item
         const stackItem = vscode.debug.activeStackItem;
-        if (stackItem && 'frameId' in stackItem) {
-            const frame = stackItem as { frameId: number; threadId: number };
-            this._currentFrameId = frame.frameId;
-            this._currentThreadId = frame.threadId;
-            this._isPaused = true;
+        if (stackItem && stackItem.session.id === session.id && 'frameId' in stackItem) {
+            this._currentFrameId = stackItem.frameId;
+            this._currentThreadId = stackItem.threadId;
             return;
         }
 
         // Try to get threads and stack trace
         try {
-            const threadsResponse = await this._activeSession.customRequest('threads', {});
+            const threadsResponse = await session.customRequest('threads', {});
+            if (!captureIsCurrent()) {
+                return;
+            }
             const threads = threadsResponse.threads || [];
 
             if (threads.length > 0) {
                 const threadId = threads[0].id;
-                this._currentThreadId = threadId;
-
-                const stackResponse = await this._activeSession.customRequest('stackTrace', {
+                const stackResponse = await session.customRequest('stackTrace', {
                     threadId,
                     startFrame: 0,
                     levels: 1,
                 });
+                if (!captureIsCurrent()) {
+                    return;
+                }
 
                 if (stackResponse.stackFrames && stackResponse.stackFrames.length > 0) {
+                    this._currentThreadId = threadId;
                     this._currentFrameId = stackResponse.stackFrames[0].id;
-                    this._isPaused = true;
                 }
             }
         } catch {
@@ -343,19 +412,25 @@ export class DebugSessionManager implements vscode.Disposable {
      * Read memory from the debugged process
      */
     public async readMemory(address: string, count: number): Promise<Uint8Array | undefined> {
-        if (!this._activeSession || !this.isValidTransferSize(count)) {
+        if (!this._activeSession || !this.isPaused || !this.isValidTransferSize(count)) {
             return undefined;
         }
+        const session = this._activeSession;
 
         try {
-            const response = await this._activeSession.customRequest('readMemory', {
+            const response = await session.customRequest('readMemory', {
                 memoryReference: address,
                 offset: 0,
                 count,
             }) as ReadMemoryResponse;
 
             if (response.data) {
-                return new Uint8Array(Buffer.from(response.data, 'base64'));
+                const bytes = new Uint8Array(Buffer.from(response.data, 'base64'));
+                if (this._activeSession?.id !== session.id || !this._isPaused ||
+                    bytes.length !== count || (response.unreadableBytes ?? 0) > 0) {
+                    return undefined;
+                }
+                return bytes;
             }
 
             return undefined;
@@ -369,11 +444,14 @@ export class DebugSessionManager implements vscode.Disposable {
      * Read memory in chunks to handle large images
      */
     public async readMemoryChunked(address: string, totalSize: number, chunkSize: number = 65536): Promise<Uint8Array | undefined> {
-        if (!this._activeSession || !this.isValidTransferSize(totalSize) ||
+        if (!this._activeSession || !this.isPaused || !this.isValidTransferSize(totalSize) ||
             !Number.isSafeInteger(chunkSize) || chunkSize <= 0) {
             return undefined;
         }
 
+        const session = this._activeSession;
+        const captureIsCurrent = (): boolean =>
+            this._activeSession?.id === session.id && this._isPaused;
         const result = new Uint8Array(totalSize);
         let offset = 0;
 
@@ -382,12 +460,20 @@ export class DebugSessionManager implements vscode.Disposable {
             const readSize = Math.min(chunkSize, remaining);
 
             try {
-                const response = await this._activeSession.customRequest('readMemory', {
+                if (!captureIsCurrent()) {
+                    console.error('[ImView] Debug context changed during memory transfer');
+                    return undefined;
+                }
+                const response = await session.customRequest('readMemory', {
                     // DAP memory references are opaque. Advance with the request offset.
                     memoryReference: address,
                     offset,
                     count: readSize,
                 }) as ReadMemoryResponse;
+                if (!captureIsCurrent()) {
+                    console.error('[ImView] Debug context changed during memory transfer');
+                    return undefined;
+                }
 
                 if (response.data) {
                     const bytes = new Uint8Array(Buffer.from(response.data, 'base64'));
@@ -431,14 +517,18 @@ export class DebugSessionManager implements vscode.Disposable {
      * Get variables from a variables reference
      */
     public async getVariables(variablesReference: number): Promise<VariableInfo[]> {
-        if (!this._activeSession || variablesReference === 0) {
+        const session = this._activeSession;
+        if (!session || !this._isPaused || variablesReference === 0) {
             return [];
         }
 
         try {
-            const response = await this._activeSession.customRequest('variables', {
+            const response = await session.customRequest('variables', {
                 variablesReference,
             });
+            if (this._activeSession?.id !== session.id || !this._isPaused) {
+                return [];
+            }
             return (response.variables ?? []) as VariableInfo[];
         } catch (error) {
             console.error(`Failed to get variables for ref ${variablesReference}:`, error);
@@ -450,14 +540,20 @@ export class DebugSessionManager implements vscode.Disposable {
      * Get scopes for the current frame
      */
     public async getScopes(): Promise<{ name: string; variablesReference: number; expensive: boolean }[]> {
-        if (!this._activeSession || this._currentFrameId === undefined) {
+        const session = this._activeSession;
+        const frameId = this._currentFrameId;
+        if (!session || !this._isPaused || frameId === undefined) {
             return [];
         }
 
         try {
-            const response = await this._activeSession.customRequest('scopes', {
-                frameId: this._currentFrameId,
+            const response = await session.customRequest('scopes', {
+                frameId,
             });
+            if (this._activeSession?.id !== session.id ||
+                this._currentFrameId !== frameId || !this._isPaused) {
+                return [];
+            }
             return response.scopes ?? [];
         } catch (error) {
             console.error('Failed to get scopes:', error);
@@ -585,10 +681,26 @@ export class DebugSessionManager implements vscode.Disposable {
      * Uses chunked reading to handle large images that exceed debugpy's output limits
      */
     public async readPythonArrayData(expression: string, ensureContiguous: boolean = true): Promise<Uint8Array | undefined> {
-        if (!this._activeSession) {
-            console.error('[ImView] No active session for readPythonArrayData');
+        if (!this._activeSession || !this.isPaused) {
+            console.error('[ImView] No paused active session for readPythonArrayData');
             return undefined;
         }
+
+        if (this._currentFrameId === undefined) {
+            await this.tryGetCurrentFrame();
+        }
+        const session = this._activeSession;
+        const frameId = this._currentFrameId;
+        if (frameId === undefined || !this._isPaused) {
+            console.error('[ImView] No fixed stack frame for Python data transfer');
+            return undefined;
+        }
+        const evaluateCaptured = (pythonExpression: string): Promise<EvaluateResponse | undefined> =>
+            this.evaluateInContext(session, frameId, pythonExpression, 'repl');
+        const captureIsCurrent = (): boolean =>
+            this._activeSession?.id === session.id &&
+            this._currentFrameId === frameId &&
+            this._isPaused;
 
         const tempVarName = `_imview_temp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
         let temporaryValueCreated = false;
@@ -611,10 +723,10 @@ export class DebugSessionManager implements vscode.Disposable {
 
             console.log(`[ImView] Store expression: ${storeExpr}`);
             temporaryValueCreated = true;
-            const sizeResult = await this.evaluate(storeExpr, 'repl');
+            const sizeResult = await evaluateCaptured(storeExpr);
             console.log(`[ImView] Size result:`, JSON.stringify(sizeResult));
 
-            if (!sizeResult || !sizeResult.result) {
+            if (!captureIsCurrent() || !sizeResult || !sizeResult.result) {
                 console.error(`[ImView] Failed to store Python array data, result:`, sizeResult);
                 return undefined;
             }
@@ -634,14 +746,18 @@ export class DebugSessionManager implements vscode.Disposable {
             let offset = 0;
 
             while (offset < totalSize) {
+                if (!captureIsCurrent()) {
+                    console.error('[ImView] Debug context changed during Python data transfer');
+                    return undefined;
+                }
                 const remaining = totalSize - offset;
                 const readSize = Math.min(chunkSize, remaining);
 
                 // Read chunk as base64
                 const chunkExpr = `__import__('base64').b64encode(globals()['${tempVarName}'][${offset}:${offset + readSize}]).decode('ascii')`;
-                const chunkResult = await this.evaluate(chunkExpr, 'repl');
+                const chunkResult = await evaluateCaptured(chunkExpr);
 
-                if (!chunkResult || !chunkResult.result) {
+                if (!captureIsCurrent() || !chunkResult || !chunkResult.result) {
                     console.error(`[ImView] Failed to read chunk at offset ${offset}, result:`, chunkResult);
                     return undefined;
                 }
@@ -684,13 +800,13 @@ export class DebugSessionManager implements vscode.Disposable {
             }
 
             console.log(`[ImView] Successfully read ${result.length} bytes`);
-            return result;
+            return captureIsCurrent() ? result : undefined;
         } catch (error) {
             console.error(`[ImView] Failed to read Python array data:`, error);
             return undefined;
         } finally {
-            if (temporaryValueCreated) {
-                await this.evaluate(`globals().pop('${tempVarName}', None)`, 'repl');
+            if (temporaryValueCreated && captureIsCurrent()) {
+                await evaluateCaptured(`globals().pop('${tempVarName}', None)`);
             }
         }
     }
@@ -750,6 +866,12 @@ export class DebugSessionManager implements vscode.Disposable {
             }
 
             const parts = contents.split(',');
+            if (parts[parts.length - 1].trim() === '') {
+                parts.pop();
+            }
+            if (parts.length === 0 || parts.some(value => value.trim() === '')) {
+                return undefined;
+            }
             const values = parts.map(value => Number(value.trim()));
 
             if (values.some(value => !Number.isFinite(value))) {

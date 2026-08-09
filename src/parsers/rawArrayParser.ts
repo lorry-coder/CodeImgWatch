@@ -1,5 +1,6 @@
-import { BaseImageParser } from './baseParser';
+import { BaseImageParser, getImageValidationError } from './baseParser';
 import { ParseResult, ImageMetadata, PixelDepth, PixelDepthSize, PixelDepthName } from '../types';
+import { calculateDataSize } from '../utils/imageTransform';
 
 /**
  * Raw memory image specification for @mem operator
@@ -33,7 +34,7 @@ export class RawArrayParser extends BaseImageParser {
      */
     static parseMemSpec(spec: string): RawImageSpec | { error: string } {
         // @mem(address, type, channels, width, height [, stride])
-        const match = spec.match(/@mem\s*\(\s*(.+)\s*\)/);
+        const match = spec.match(/^@mem\s*\(\s*([^()]*)\s*\)\s*$/);
         if (!match) {
             return { error: 'Invalid @mem syntax. Expected: @mem(address, type, channels, width, height [, stride])' };
         }
@@ -46,13 +47,12 @@ export class RawArrayParser extends BaseImageParser {
         const [addressStr, typeStr, channelsStr, widthStr, heightStr, strideStr] = args;
 
         // Parse address
-        let address: string;
-        if (addressStr.startsWith('0x') || addressStr.startsWith('0X')) {
-            address = addressStr;
-        } else if (/^[0-9a-fA-F]+$/.test(addressStr)) {
-            address = '0x' + addressStr;
-        } else {
+        const address = this.normalizeAddress(addressStr);
+        if (!address) {
             return { error: `Invalid address: ${addressStr}` };
+        }
+        if (this.isNullAddress(address)) {
+            return { error: 'Address must not be null' };
         }
 
         // Parse pixel type
@@ -62,33 +62,64 @@ export class RawArrayParser extends BaseImageParser {
         }
 
         // Parse channels
-        const channels = parseInt(channelsStr, 10);
-        if (isNaN(channels) || channels < 1 || channels > 4) {
+        const channels = this.parseStrictPositiveInteger(channelsStr);
+        if (channels === undefined || channels > 4) {
             return { error: `Invalid channel count: ${channelsStr}. Must be 1-4` };
         }
 
         // Parse width
-        const width = parseInt(widthStr, 10);
-        if (isNaN(width) || width <= 0) {
+        const width = this.parseStrictPositiveInteger(widthStr);
+        if (width === undefined) {
             return { error: `Invalid width: ${widthStr}` };
         }
 
         // Parse height
-        const height = parseInt(heightStr, 10);
-        if (isNaN(height) || height <= 0) {
+        const height = this.parseStrictPositiveInteger(heightStr);
+        if (height === undefined) {
             return { error: `Invalid height: ${heightStr}` };
         }
 
         // Parse optional stride
         let stride: number | undefined;
         if (strideStr) {
-            stride = parseInt(strideStr, 10);
-            if (isNaN(stride) || stride <= 0) {
+            stride = this.parseStrictPositiveInteger(strideStr);
+            if (stride === undefined) {
                 return { error: `Invalid stride: ${strideStr}` };
             }
         }
 
+        const effectiveStride = stride ?? width * channels * PixelDepthSize[pixelType];
+        const validationError = getImageValidationError(
+            width,
+            height,
+            channels,
+            pixelType,
+            effectiveStride
+        );
+        if (validationError) {
+            return { error: validationError };
+        }
+
         return { address, pixelType, channels, width, height, stride };
+    }
+
+    private static parseStrictPositiveInteger(value: string): number | undefined {
+        if (!/^\d+$/.test(value)) {
+            return undefined;
+        }
+        const parsed = Number(value);
+        return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+    }
+
+    private static normalizeAddress(value: string): string | undefined {
+        if (/^0[xX][0-9a-fA-F]{1,16}$/.test(value)) {
+            return `0x${value.slice(2)}`;
+        }
+        return /^[0-9a-fA-F]{1,16}$/.test(value) ? `0x${value}` : undefined;
+    }
+
+    private static isNullAddress(value: string): boolean {
+        return /^0x0+$/i.test(value);
     }
 
     /**
@@ -137,12 +168,25 @@ export class RawArrayParser extends BaseImageParser {
      * Create ImageMetadata from a RawImageSpec
      */
     static createMetadata(spec: RawImageSpec, expression: string): ImageMetadata {
+        const address = this.normalizeAddress(spec.address);
+        if (!address || this.isNullAddress(address)) {
+            throw new Error(`Invalid or null address: ${spec.address}`);
+        }
         const pixelSize = PixelDepthSize[spec.pixelType] * spec.channels;
         const stride = spec.stride ?? (spec.width * pixelSize);
-        const dataSize = stride * spec.height;
+        const validationError = getImageValidationError(
+            spec.width,
+            spec.height,
+            spec.channels,
+            spec.pixelType,
+            stride
+        );
+        if (validationError) {
+            throw new Error(validationError);
+        }
 
-        return {
-            id: `raw_${Date.now()}_${spec.address}`,
+        const metadata: ImageMetadata = {
+            id: `raw_${Date.now()}_${address}`,
             name: expression,
             expression,
             typeName: `RawArray<${PixelDepthName[spec.pixelType]}, ${spec.channels}>`,
@@ -151,12 +195,14 @@ export class RawArrayParser extends BaseImageParser {
             width: spec.width,
             height: spec.height,
             stride,
-            dataAddress: spec.address,
-            dataSize,
+            dataAddress: address,
+            dataSize: 0,
             isContinuous: stride === spec.width * pixelSize,
             rawProperties: {
                 isRawMemory: true,
             },
         };
+        metadata.dataSize = calculateDataSize(metadata);
+        return metadata;
     }
 }

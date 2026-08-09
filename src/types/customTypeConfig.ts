@@ -78,7 +78,7 @@ export function validateCustomTypeConfig(config: unknown): config is CustomTypeC
 
     const c = config as Record<string, unknown>;
 
-    if (typeof c.typeName !== 'string' || c.typeName.length === 0) {
+    if (typeof c.typeName !== 'string' || c.typeName.trim().length === 0) {
         return false;
     }
 
@@ -91,18 +91,31 @@ export function validateCustomTypeConfig(config: unknown): config is CustomTypeC
     // Required string properties
     const requiredStrings = ['width', 'height', 'data'];
     for (const prop of requiredStrings) {
-        if (typeof props[prop] !== 'string' || (props[prop] as string).length === 0) {
+        if (typeof props[prop] !== 'string' || (props[prop] as string).trim().length === 0) {
             return false;
         }
     }
 
-    // channels can be string or number
-    if (typeof props.channels !== 'string' && typeof props.channels !== 'number') {
+    // channels can be a non-empty member expression or a supported constant
+    if (typeof props.channels === 'string') {
+        if (props.channels.trim().length === 0) {
+            return false;
+        }
+    } else if (typeof props.channels === 'number') {
+        if (!Number.isSafeInteger(props.channels) || props.channels < 1 || props.channels > 4) {
+            return false;
+        }
+    } else {
         return false;
     }
 
     // stride can be string (including 'auto')
-    if (typeof props.stride !== 'string') {
+    if (typeof props.stride !== 'string' || props.stride.trim().length === 0) {
+        return false;
+    }
+
+    if (props.isValid !== undefined &&
+        (typeof props.isValid !== 'string' || props.isValid.trim().length === 0)) {
         return false;
     }
 

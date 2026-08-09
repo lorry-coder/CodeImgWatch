@@ -24,19 +24,26 @@ import { TorchTensorParser } from './torchParser';
  */
 export function registerBuiltInParsers(): void {
     const registry = ImageParserRegistry.getInstance();
+    const registeredNames = new Set(registry.getAllParsers().map(parser => parser.name));
+    const register = (parser: Parameters<typeof registry.register>[0]): void => {
+        if (!registeredNames.has(parser.name)) {
+            registry.register(parser);
+            registeredNames.add(parser.name);
+        }
+    };
 
     // Register in order of priority (registry will sort them)
     // C++ parsers
-    registry.register(new CvVecParser());
-    registry.register(new CvMatxParser());
-    registry.register(new CvMatTemplateParser());
-    registry.register(new CvMatParser());
-    registry.register(new CustomTypeParser());
-    registry.register(new CvMatLegacyParser());
-    registry.register(new IplImageParser());
+    register(new CvVecParser());
+    register(new CvMatxParser());
+    register(new CvMatTemplateParser());
+    register(new CvMatParser());
+    register(new CustomTypeParser());
+    register(new CvMatLegacyParser());
+    register(new IplImageParser());
 
     // Python parsers
-    registry.register(new NumpyArrayParser());
-    registry.register(new TorchTensorParser());
-    registry.register(new PILImageParser());
+    register(new NumpyArrayParser());
+    register(new TorchTensorParser());
+    register(new PILImageParser());
 }

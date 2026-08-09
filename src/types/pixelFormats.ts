@@ -64,15 +64,17 @@ export type ByteOrder = 'little' | 'big';
  * OpenCV type encoding/decoding utilities
  */
 export const CV_CN_SHIFT = 3;
+export const CV_CN_MAX = 512;
 export const CV_DEPTH_MASK = 7;
 export const CV_MAT_DEPTH_MASK = CV_DEPTH_MASK;
+export const CV_MAT_CN_MASK = (CV_CN_MAX - 1) << CV_CN_SHIFT;
 
 /**
  * Decode OpenCV type field into depth and channel count
  */
 export function decodeCvType(type: number): { depth: PixelDepth; channels: number } {
     const depth = (type & CV_DEPTH_MASK) as PixelDepth;
-    const channels = ((type >> CV_CN_SHIFT) & 63) + 1;
+    const channels = ((type & CV_MAT_CN_MASK) >> CV_CN_SHIFT) + 1;
     return { depth, channels };
 }
 

@@ -92,20 +92,30 @@ function getNumberArg(arg: ExpressionNode): number | undefined {
  */
 function transformPixels(
     source: ImageData,
-    transform: (values: number[], x: number, y: number) => number[]
+    transform: (values: number[], x: number, y: number) => number[],
+    outputDepth: PixelDepth = source.metadata.depth
 ): ImageData {
     const meta = source.metadata;
-    const pixelSize = PixelDepthSize[meta.depth];
-    const newData = new Uint8Array(source.data.length);
+    const sourcePixelSize = PixelDepthSize[meta.depth];
+    const outputPixelSize = PixelDepthSize[outputDepth];
+    const newStride = meta.width * meta.channels * outputPixelSize;
+    const newData = new Uint8Array(newStride * meta.height);
+    const littleEndian = meta.byteOrder !== 'big';
 
     for (let y = 0; y < meta.height; y++) {
         for (let x = 0; x < meta.width; x++) {
-            const offset = y * meta.stride + x * meta.channels * pixelSize;
+            const sourceOffset = y * meta.stride + x * meta.channels * sourcePixelSize;
+            const outputOffset = y * newStride + x * meta.channels * outputPixelSize;
 
             // Read pixel values
             const values: number[] = [];
             for (let c = 0; c < meta.channels; c++) {
-                values.push(readPixelValue(source.data, offset + c * pixelSize, meta.depth));
+                values.push(readPixelValue(
+                    source.data,
+                    sourceOffset + c * sourcePixelSize,
+                    meta.depth,
+                    littleEndian
+                ));
             }
 
             // Transform
@@ -113,13 +123,27 @@ function transformPixels(
 
             // Write pixel values
             for (let c = 0; c < meta.channels; c++) {
-                writePixelValue(newData, offset + c * pixelSize, meta.depth, newValues[c] ?? 0);
+                writePixelValue(
+                    newData,
+                    outputOffset + c * outputPixelSize,
+                    outputDepth,
+                    newValues[c] ?? 0,
+                    littleEndian
+                );
             }
         }
     }
 
     return {
-        metadata: { ...meta, id: `${meta.id}_transformed` },
+        metadata: {
+            ...meta,
+            id: `${meta.id}_transformed`,
+            depth: outputDepth,
+            stride: newStride,
+            dataSize: newData.length,
+            isContinuous: true,
+            dataLayout: 'HWC',
+        },
         data: newData,
         timestamp: Date.now(),
     };
@@ -128,94 +152,117 @@ function transformPixels(
 /**
  * Read pixel value from buffer
  */
-function readPixelValue(data: Uint8Array, offset: number, depth: PixelDepth): number {
+function readPixelValue(
+    data: Uint8Array,
+    offset: number,
+    depth: PixelDepth,
+    littleEndian: boolean = true
+): number {
+    const view = new DataView(data.buffer, data.byteOffset + offset, PixelDepthSize[depth]);
     switch (depth) {
         case PixelDepth.CV_8U:
-            return data[offset];
+            return view.getUint8(0);
         case PixelDepth.CV_8S:
-            return data[offset] > 127 ? data[offset] - 256 : data[offset];
+            return view.getInt8(0);
         case PixelDepth.CV_16U:
-            return data[offset] | (data[offset + 1] << 8);
-        case PixelDepth.CV_16S: {
-            const v = data[offset] | (data[offset + 1] << 8);
-            return v > 32767 ? v - 65536 : v;
-        }
-        case PixelDepth.CV_32S: {
-            return data[offset] | (data[offset + 1] << 8) |
-                (data[offset + 2] << 16) | (data[offset + 3] << 24);
-        }
-        case PixelDepth.CV_32F: {
-            const buffer = new ArrayBuffer(4);
-            const view = new DataView(buffer);
-            for (let i = 0; i < 4; i++) {
-                view.setUint8(i, data[offset + i]);
-            }
-            return view.getFloat32(0, true);
-        }
-        case PixelDepth.CV_64F: {
-            const buffer = new ArrayBuffer(8);
-            const view = new DataView(buffer);
-            for (let i = 0; i < 8; i++) {
-                view.setUint8(i, data[offset + i]);
-            }
-            return view.getFloat64(0, true);
-        }
+            return view.getUint16(0, littleEndian);
+        case PixelDepth.CV_16S:
+            return view.getInt16(0, littleEndian);
+        case PixelDepth.CV_32S:
+            return view.getInt32(0, littleEndian);
+        case PixelDepth.CV_32F:
+            return view.getFloat32(0, littleEndian);
+        case PixelDepth.CV_64F:
+            return view.getFloat64(0, littleEndian);
+        case PixelDepth.CV_16F:
+            return halfToNumber(view.getUint16(0, littleEndian));
         default:
-            return data[offset];
+            return 0;
     }
 }
 
 /**
  * Write pixel value to buffer
  */
-function writePixelValue(data: Uint8Array, offset: number, depth: PixelDepth, value: number): void {
+function writePixelValue(
+    data: Uint8Array,
+    offset: number,
+    depth: PixelDepth,
+    value: number,
+    littleEndian: boolean = true
+): void {
+    const view = new DataView(data.buffer, data.byteOffset + offset, PixelDepthSize[depth]);
     switch (depth) {
         case PixelDepth.CV_8U:
-            data[offset] = Math.max(0, Math.min(255, Math.round(value)));
+            view.setUint8(0, Math.max(0, Math.min(255, Math.round(value))));
             break;
         case PixelDepth.CV_8S:
-            data[offset] = Math.max(-128, Math.min(127, Math.round(value))) & 0xFF;
+            view.setInt8(0, Math.max(-128, Math.min(127, Math.round(value))));
             break;
-        case PixelDepth.CV_16U: {
-            const v = Math.max(0, Math.min(65535, Math.round(value)));
-            data[offset] = v & 0xFF;
-            data[offset + 1] = (v >> 8) & 0xFF;
+        case PixelDepth.CV_16U:
+            view.setUint16(0, Math.max(0, Math.min(65535, Math.round(value))), littleEndian);
             break;
-        }
-        case PixelDepth.CV_16S: {
-            const v = Math.max(-32768, Math.min(32767, Math.round(value)));
-            const u = v < 0 ? v + 65536 : v;
-            data[offset] = u & 0xFF;
-            data[offset + 1] = (u >> 8) & 0xFF;
+        case PixelDepth.CV_16S:
+            view.setInt16(0, Math.max(-32768, Math.min(32767, Math.round(value))), littleEndian);
             break;
-        }
-        case PixelDepth.CV_32S: {
-            const v = Math.round(value);
-            data[offset] = v & 0xFF;
-            data[offset + 1] = (v >> 8) & 0xFF;
-            data[offset + 2] = (v >> 16) & 0xFF;
-            data[offset + 3] = (v >> 24) & 0xFF;
+        case PixelDepth.CV_32S:
+            view.setInt32(0, Math.max(-2147483648, Math.min(2147483647, Math.round(value))), littleEndian);
             break;
-        }
-        case PixelDepth.CV_32F: {
-            const buffer = new ArrayBuffer(4);
-            const view = new DataView(buffer);
-            view.setFloat32(0, value, true);
-            for (let i = 0; i < 4; i++) {
-                data[offset + i] = view.getUint8(i);
-            }
+        case PixelDepth.CV_32F:
+            view.setFloat32(0, value, littleEndian);
             break;
-        }
-        case PixelDepth.CV_64F: {
-            const buffer = new ArrayBuffer(8);
-            const view = new DataView(buffer);
-            view.setFloat64(0, value, true);
-            for (let i = 0; i < 8; i++) {
-                data[offset + i] = view.getUint8(i);
-            }
+        case PixelDepth.CV_64F:
+            view.setFloat64(0, value, littleEndian);
             break;
-        }
+        case PixelDepth.CV_16F:
+            view.setUint16(0, numberToHalf(value), littleEndian);
+            break;
     }
+}
+
+function halfToNumber(bits: number): number {
+    const sign = (bits & 0x8000) ? -1 : 1;
+    const exponent = (bits >> 10) & 0x1F;
+    const fraction = bits & 0x03FF;
+    if (exponent === 0) {
+        return sign * Math.pow(2, -14) * (fraction / 1024);
+    }
+    if (exponent === 0x1F) {
+        return fraction === 0 ? sign * Infinity : NaN;
+    }
+    return sign * Math.pow(2, exponent - 15) * (1 + fraction / 1024);
+}
+
+function numberToHalf(value: number): number {
+    if (Number.isNaN(value)) {
+        return 0x7E00;
+    }
+    const sign = value < 0 || Object.is(value, -0) ? 0x8000 : 0;
+    const absolute = Math.abs(value);
+    if (absolute === Infinity) {
+        return sign | 0x7C00;
+    }
+    if (absolute === 0) {
+        return sign;
+    }
+
+    const exponent = Math.floor(Math.log2(absolute));
+    if (exponent < -14) {
+        return sign | Math.round(absolute / Math.pow(2, -24));
+    }
+    if (exponent > 15) {
+        return sign | 0x7C00;
+    }
+    const encodedExponent = exponent + 15;
+    let fraction = Math.round((absolute / Math.pow(2, exponent) - 1) * 1024);
+    if (fraction === 1024) {
+        if (encodedExponent + 1 >= 31) {
+            return sign | 0x7C00;
+        }
+        return sign | ((encodedExponent + 1) << 10);
+    }
+    fraction = Math.max(0, Math.min(1023, fraction));
+    return sign | (encodedExponent << 10) | fraction;
 }
 
 // =====================================
@@ -236,8 +283,8 @@ registerOperator('band', async (args, context) => {
     }
 
     const channel = getNumberArg(args[1]);
-    if (channel === undefined) {
-        return { success: false, error: '@band channel argument must be a number' };
+    if (channel === undefined || !Number.isInteger(channel)) {
+        return { success: false, error: '@band channel argument must be an integer' };
     }
 
     const meta = imageData.metadata;
@@ -333,7 +380,14 @@ registerOperator('thresh', async (args, context) => {
         return { success: false, error: '@thresh threshold must be a number' };
     }
 
-    const maxVal = imageData.metadata.depth === PixelDepth.CV_8U ? 255 : 1;
+    const maxValues: Partial<Record<PixelDepth, number>> = {
+        [PixelDepth.CV_8U]: 255,
+        [PixelDepth.CV_8S]: 127,
+        [PixelDepth.CV_16U]: 65535,
+        [PixelDepth.CV_16S]: 32767,
+        [PixelDepth.CV_32S]: 2147483647,
+    };
+    const maxVal = maxValues[imageData.metadata.depth] ?? 1;
     const result = transformPixels(imageData, (values) =>
         values.map(v => (v >= threshold ? maxVal : 0))
     );
@@ -358,6 +412,9 @@ registerOperator('clamp', async (args, context) => {
     if (minVal === undefined || maxVal === undefined) {
         return { success: false, error: '@clamp min/max must be numbers' };
     }
+    if (minVal > maxVal) {
+        return { success: false, error: '@clamp requires min to be less than or equal to max' };
+    }
 
     const result = transformPixels(imageData, (values) =>
         values.map(v => Math.max(minVal, Math.min(maxVal, v)))
@@ -366,7 +423,7 @@ registerOperator('clamp', async (args, context) => {
 });
 
 /**
- * @norm8(img) - Normalize to 0-255 range (divide by 255)
+ * @norm8(img) - Normalize uint8-style values to floating point 0-1
  */
 registerOperator('norm8', async (args, context) => {
     if (args.length !== 1) {
@@ -378,7 +435,11 @@ registerOperator('norm8', async (args, context) => {
         return { success: false, error: 'Failed to get image for @norm8' };
     }
 
-    const result = transformPixels(imageData, (values) => values.map(v => v / 255));
+    const result = transformPixels(
+        imageData,
+        (values) => values.map(v => v / 255),
+        PixelDepth.CV_32F
+    );
     return { success: true, data: result };
 });
 
@@ -395,7 +456,11 @@ registerOperator('norm16', async (args, context) => {
         return { success: false, error: 'Failed to get image for @norm16' };
     }
 
-    const result = transformPixels(imageData, (values) => values.map(v => v / 65535));
+    const result = transformPixels(
+        imageData,
+        (values) => values.map(v => v / 65535),
+        PixelDepth.CV_32F
+    );
     return { success: true, data: result };
 });
 
@@ -425,19 +490,37 @@ registerOperator('diff', async (args, context) => {
         return { success: false, error: '@diff requires images with same number of channels' };
     }
 
+    if (meta1.depth !== meta2.depth) {
+        return { success: false, error: '@diff requires images with the same pixel depth' };
+    }
+
+    const defaultChannelFormat = (metadata: ImageData['metadata']): string | undefined => {
+        if (metadata.channelFormat) {
+            return metadata.channelFormat;
+        }
+        return metadata.channels === 3 ? 'bgr' : metadata.channels === 4 ? 'bgra' : undefined;
+    };
+    if (defaultChannelFormat(meta1) !== defaultChannelFormat(meta2)) {
+        return { success: false, error: '@diff requires images with the same channel order' };
+    }
+
     const pixelSize = PixelDepthSize[meta1.depth];
-    const newData = new Uint8Array(img1.data.length);
+    const newStride = meta1.width * meta1.channels * pixelSize;
+    const newData = new Uint8Array(newStride * meta1.height);
+    const littleEndian1 = meta1.byteOrder !== 'big';
+    const littleEndian2 = meta2.byteOrder !== 'big';
 
     for (let y = 0; y < meta1.height; y++) {
         for (let x = 0; x < meta1.width; x++) {
             for (let c = 0; c < meta1.channels; c++) {
                 const offset1 = y * meta1.stride + x * meta1.channels * pixelSize + c * pixelSize;
                 const offset2 = y * meta2.stride + x * meta2.channels * pixelSize + c * pixelSize;
+                const outputOffset = y * newStride + x * meta1.channels * pixelSize + c * pixelSize;
 
-                const v1 = readPixelValue(img1.data, offset1, meta1.depth);
-                const v2 = readPixelValue(img2.data, offset2, meta2.depth);
+                const v1 = readPixelValue(img1.data, offset1, meta1.depth, littleEndian1);
+                const v2 = readPixelValue(img2.data, offset2, meta2.depth, littleEndian2);
 
-                writePixelValue(newData, offset1, meta1.depth, Math.abs(v1 - v2));
+                writePixelValue(newData, outputOffset, meta1.depth, Math.abs(v1 - v2), littleEndian1);
             }
         }
     }
@@ -445,7 +528,14 @@ registerOperator('diff', async (args, context) => {
     return {
         success: true,
         data: {
-            metadata: { ...meta1, id: `diff_${meta1.id}_${meta2.id}` },
+            metadata: {
+                ...meta1,
+                id: `diff_${meta1.id}_${meta2.id}`,
+                stride: newStride,
+                dataSize: newData.length,
+                isContinuous: true,
+                dataLayout: 'HWC',
+            },
             data: newData,
             timestamp: Date.now(),
         },
@@ -505,15 +595,13 @@ registerOperator('flipv', async (args, context) => {
     }
 
     const meta = imageData.metadata;
+    const rowSize = meta.width * meta.channels * PixelDepthSize[meta.depth];
     const newData = new Uint8Array(imageData.data.length);
 
     for (let y = 0; y < meta.height; y++) {
         const srcRowStart = y * meta.stride;
         const dstRowStart = (meta.height - 1 - y) * meta.stride;
-
-        for (let i = 0; i < meta.stride; i++) {
-            newData[dstRowStart + i] = imageData.data[srcRowStart + i];
-        }
+        newData.set(imageData.data.subarray(srcRowStart, srcRowStart + rowSize), dstRowStart);
     }
 
     return {

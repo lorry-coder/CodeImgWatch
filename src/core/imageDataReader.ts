@@ -1,5 +1,5 @@
 import { DebugSessionManager } from './debugSessionManager';
-import { ImageMetadata, ImageTypeName, PixelDepthSize } from '../types';
+import { ImageItem, ImageMetadata, ImageTypeName, PixelDepthSize } from '../types';
 import { calculateDataSize, chwToHwc } from '../utils/imageTransform';
 
 export interface DisplayImageData {
@@ -25,7 +25,17 @@ export function getPythonDataExpression(metadata: ImageMetadata): string {
         if (typeof conversionDtype === 'string' && conversionDtype.length > 0) {
             tensorExpression += `.to(dtype=__import__('torch').${conversionDtype})`;
         }
-        return `${tensorExpression}.contiguous().numpy()`;
+        tensorExpression += '.contiguous()';
+
+        // Avoid Tensor.numpy(): older PyTorch wheels can be ABI-incompatible
+        // with newer NumPy releases even though the tensor itself is usable.
+        // string_at copies the contiguous CPU storage while the lambda keeps
+        // the tensor alive; memoryview retains the existing .tobytes() transfer
+        // contract used by DebugSessionManager.
+        return `((lambda _imview_tensor: __import__('builtins').memoryview(` +
+            `__import__('ctypes').string_at(_imview_tensor.data_ptr(), ` +
+            `_imview_tensor.numel() * _imview_tensor.element_size())))(` +
+            `${tensorExpression}))`;
     }
 
     return `__import__('numpy').ascontiguousarray(${expression})`;
@@ -50,6 +60,20 @@ export async function readImageDataForDisplay(
 
     if (!data) {
         return undefined;
+    }
+
+    if (metadata.debuggerType === 'debugpy') {
+        const expectedTransferSize = metadata.width * metadata.height *
+            metadata.channels * PixelDepthSize[metadata.depth];
+        if (!Number.isSafeInteger(expectedTransferSize) ||
+            expectedTransferSize <= 0 ||
+            data.length !== expectedTransferSize) {
+            console.error(
+                `[ImView] Python pixel buffer size mismatch for ${metadata.expression}: ` +
+                `expected ${expectedTransferSize}, got ${data.length}`
+            );
+            return undefined;
+        }
     }
 
     if (metadata.dataLayout === 'CHW' && metadata.channels > 1) {
@@ -77,4 +101,21 @@ export async function readImageDataForDisplay(
     }
 
     return { data, metadata: displayMetadata };
+}
+
+/** Return materialized operator pixels or read the item's current debuggee buffer. */
+export async function readImageItemDataForDisplay(
+    session: DebugSessionManager,
+    item: ImageItem
+): Promise<DisplayImageData | undefined> {
+    if (!session.isPaused) {
+        return undefined;
+    }
+    if (item.imageData) {
+        return {
+            metadata: item.imageData.metadata,
+            data: item.imageData.data,
+        };
+    }
+    return item.metadata ? readImageDataForDisplay(session, item.metadata) : undefined;
 }

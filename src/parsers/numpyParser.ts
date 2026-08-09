@@ -39,10 +39,9 @@ export class NumpyArrayParser extends BaseImageParser {
     readonly priority = 100; // High priority for Python images
 
     canParse(typeName: string): boolean {
-        // debugpy often shows numpy arrays as just "array"
         return /\bndarray\b/.test(typeName) ||
                /numpy\.ndarray/.test(typeName) ||
-               /\barray\b/.test(typeName);
+               /^(?:cv2\.)?Mat$/.test(typeName);
     }
 
     async parse(
@@ -50,8 +49,10 @@ export class NumpyArrayParser extends BaseImageParser {
         expression: string
     ): Promise<ParseResult> {
         try {
+            const sourceExpression = `(${expression})`;
+
             // Get shape
-            const shape = await session.evaluatePythonAsTuple(`${expression}.shape`);
+            const shape = await session.evaluatePythonAsTuple(`${sourceExpression}.shape`);
             if (!shape || shape.length === 0) {
                 return this.errorResult('Failed to get array shape');
             }
@@ -78,7 +79,7 @@ export class NumpyArrayParser extends BaseImageParser {
             }
 
             // Get dtype
-            const dtypeResult = await session.evaluatePythonAsString(`str(${expression}.dtype)`);
+            const dtypeResult = await session.evaluatePythonAsString(`str(${sourceExpression}.dtype)`);
             if (!dtypeResult) {
                 return this.errorResult('Failed to get array dtype');
             }
@@ -90,7 +91,9 @@ export class NumpyArrayParser extends BaseImageParser {
             }
 
             // Check if array is contiguous
-            const isCContiguous = await session.evaluatePythonAsString(`str(${expression}.flags['C_CONTIGUOUS'])`);
+            const isCContiguous = await session.evaluatePythonAsString(
+                `str(${sourceExpression}.flags['C_CONTIGUOUS'])`
+            );
             const isContinuous = isCContiguous === 'True';
 
             // Calculate stride and data size
@@ -160,22 +163,11 @@ export class NumpyArrayParser extends BaseImageParser {
      * Parse NumPy dtype string to PixelDepth
      */
     private parseNumpyDtype(dtype: string): PixelDepth | undefined {
-        // Normalize dtype string
-        const normalized = dtype.toLowerCase().replace(/[<>|=]/g, '');
-
-        // Direct match
-        if (normalized in NUMPY_DTYPE_MAP) {
-            return NUMPY_DTYPE_MAP[normalized];
-        }
-
-        // Check for common patterns like 'float64', 'int32', etc.
-        for (const [key, value] of Object.entries(NUMPY_DTYPE_MAP)) {
-            if (normalized.includes(key)) {
-                return value;
-            }
-        }
-
-        return undefined;
+        // NumPy prefixes scalar dtype strings with a byte-order marker. Match
+        // the remaining name exactly so structured dtypes containing strings
+        // such as "u1" are not silently treated as scalar pixel buffers.
+        const normalized = dtype.trim().toLowerCase().replace(/^[<>|=]/, '');
+        return NUMPY_DTYPE_MAP[normalized];
     }
 
     private getNumpyByteOrder(dtype: string): ByteOrder {

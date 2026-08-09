@@ -1,5 +1,7 @@
 """Set a breakpoint on the final print to exercise Python image parsers."""
 
+import io
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -13,11 +15,16 @@ non_contiguous = bgr[:, ::2, :]
 pil_rgb = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
 pil_rgba = pil_rgb.convert("RGBA")
 pil_palette = pil_rgb.convert("P")
+pil_buffer = io.BytesIO()
+pil_rgb.save(pil_buffer, format="PNG")
+pil_buffer.seek(0)
+pil_file = Image.open(pil_buffer)
 
 try:
     import torch
 
-    tensor_chw = torch.from_numpy(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)).permute(2, 0, 1)
+    # Avoid relying on the optional PyTorch/NumPy ABI bridge in this sample.
+    tensor_chw = torch.arange(3 * 100 * 100, dtype=torch.uint8).reshape(3, 100, 100)
 except (ImportError, RuntimeError):
     tensor_chw = None
 

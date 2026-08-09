@@ -351,7 +351,7 @@ IMVIEW_TEST_EXTENSION_PATHS="<debugpy-path>:<cpptools-path>" \
 npm test
 ```
 
-在 Windows 上，`IMVIEW_TEST_EXTENSION_PATHS` 使用分号分隔路径。跨平台编译、lint 和生产打包由 `.github/workflows/ci.yml` 在 Windows、macOS、Linux 上执行。
+在 Windows 上，`IMVIEW_TEST_EXTENSION_PATHS` 使用分号分隔路径。跨平台编译、lint、Extension Host 测试和生产打包由 `.github/workflows/ci.yml` 在 Windows、macOS、Linux 上执行。
 
 ### 测试用 C++ 程序
 
@@ -364,9 +364,7 @@ npm test
 - [ ] 缩略图预览
 - [ ] ROI 选择
 - [ ] 直方图显示
-- [ ] 多图像同步视图
 - [ ] @file 操作符（从文件加载）
-- [ ] @mem 操作符完整实现
 - [ ] 更多颜色空间支持（YUV, HSV 等）
 
 ---

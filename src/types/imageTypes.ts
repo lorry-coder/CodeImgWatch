@@ -120,6 +120,9 @@ export interface ImageItem {
     /** Associated metadata if available */
     metadata?: ImageMetadata;
 
+    /** Materialized pixels for derived expressions that do not map to debuggee memory */
+    imageData?: ImageData;
+
     /** Thumbnail data URL if available */
     thumbnail?: string;
 

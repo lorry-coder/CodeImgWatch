@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { DebugSessionManager } from '../core/debugSessionManager';
-import { isKnownImageType, normalizeTypeName } from '../parsers/baseParser';
+import { ImageParserRegistry, normalizeTypeName } from '../parsers/baseParser';
 
 interface DapVariable {
     name: string;
@@ -11,8 +11,12 @@ interface DapVariable {
 interface DapMessage {
     type?: string;
     command?: string;
+    event?: string;
     body?: {
         variables?: DapVariable[];
+        threadId?: number;
+        allThreadsStopped?: boolean;
+        allThreadsContinued?: boolean;
     };
 }
 
@@ -68,7 +72,7 @@ export class DebugVariableDecorator implements vscode.Disposable {
                 const typeName = variable.type ?? '';
                 const normalizedType = normalizeTypeName(typeName);
 
-                if (isKnownImageType(normalizedType)) {
+                if (ImageParserRegistry.getInstance().findParser(normalizedType)) {
                     const name = variable.evaluateName ?? variable.name;
                     this.knownImageVariables.add(name);
                 }
@@ -124,6 +128,12 @@ export class DebugVariableDecorator implements vscode.Disposable {
 export class ImageWatchDebugAdapterTracker implements vscode.DebugAdapterTracker {
     private imageVariableNames: Set<string> = new Set();
 
+    constructor(
+        private readonly session?: vscode.DebugSession,
+        private readonly sessionManager: DebugSessionManager = DebugSessionManager.getInstance(),
+        private readonly onStop?: () => void
+    ) {}
+
     onWillReceiveMessage(): void {
         // Could intercept requests here if needed
     }
@@ -133,6 +143,13 @@ export class ImageWatchDebugAdapterTracker implements vscode.DebugAdapterTracker
             return;
         }
         const dapMessage = message as DapMessage;
+        if (dapMessage.type === 'event' && this.session) {
+            if (dapMessage.event === 'stopped') {
+                void this.sessionManager.handleAdapterStopped(this.session, dapMessage.body ?? {});
+            } else if (dapMessage.event === 'continued') {
+                this.sessionManager.handleAdapterContinued(this.session, dapMessage.body ?? {});
+            }
+        }
         // Intercept variable responses to detect image types
         if (dapMessage.type === 'response' && dapMessage.command === 'variables') {
             this.processVariables(dapMessage.body?.variables ?? []);
@@ -144,7 +161,7 @@ export class ImageWatchDebugAdapterTracker implements vscode.DebugAdapterTracker
             const typeName = v.type ?? '';
             const normalizedType = normalizeTypeName(typeName);
 
-            if (isKnownImageType(normalizedType)) {
+            if (ImageParserRegistry.getInstance().findParser(normalizedType)) {
                 const name = v.evaluateName ?? v.name;
                 this.imageVariableNames.add(name);
 
@@ -157,6 +174,10 @@ export class ImageWatchDebugAdapterTracker implements vscode.DebugAdapterTracker
     public isImageVariable(name: string): boolean {
         return this.imageVariableNames.has(name);
     }
+
+    onWillStopSession(): void {
+        this.onStop?.();
+    }
 }
 
 /**
@@ -166,7 +187,11 @@ export class ImageWatchDebugAdapterTrackerFactory implements vscode.DebugAdapter
     private trackers: Map<string, ImageWatchDebugAdapterTracker> = new Map();
 
     createDebugAdapterTracker(session: vscode.DebugSession): vscode.ProviderResult<vscode.DebugAdapterTracker> {
-        const tracker = new ImageWatchDebugAdapterTracker();
+        const tracker = new ImageWatchDebugAdapterTracker(
+            session,
+            DebugSessionManager.getInstance(),
+            () => this.trackers.delete(session.id)
+        );
         this.trackers.set(session.id, tracker);
         return tracker;
     }

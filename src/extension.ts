@@ -1,17 +1,16 @@
 import * as vscode from 'vscode';
 import { DebugSessionManager } from './core/debugSessionManager';
-import { registerBuiltInParsers, ImageParserRegistry, isKnownImageType, normalizeTypeName } from './parsers';
+import { registerBuiltInParsers, ImageParserRegistry } from './parsers';
 import { ImageListProvider, ImageTreeItem } from './providers/imageListProvider';
 import { ImageViewerProvider } from './providers/imageViewerProvider';
 import { ImageEditorManager } from './providers/imageEditorProvider';
-import { DebugVariableDecorator, ImageWatchDebugAdapterTrackerFactory } from './providers/debugVariableDecorator';
+import { ImageWatchDebugAdapterTrackerFactory } from './providers/debugVariableDecorator';
 import { ImageItem } from './types';
 
 let sessionManager: DebugSessionManager;
 let imageListProvider: ImageListProvider;
 let imageViewerProvider: ImageViewerProvider;
 let imageEditorManager: ImageEditorManager;
-let debugVariableDecorator: DebugVariableDecorator;
 let debugAdapterTrackerFactory: ImageWatchDebugAdapterTrackerFactory;
 
 interface DebugVariableContext {
@@ -59,7 +58,6 @@ export function activate(context: vscode.ExtensionContext): void {
     imageListProvider = new ImageListProvider(context);
     imageViewerProvider = new ImageViewerProvider(context.extensionUri);
     imageEditorManager = new ImageEditorManager(context.extensionUri);
-    debugVariableDecorator = new DebugVariableDecorator();
 
     // Register debug adapter tracker factory for intercepting variable info
     debugAdapterTrackerFactory = new ImageWatchDebugAdapterTrackerFactory();
@@ -101,6 +99,25 @@ export function activate(context: vscode.ExtensionContext): void {
         }
     });
 
+    // Keep every open viewer tied to the freshly parsed item from the current stop.
+    imageListProvider.onDidRefreshImages((items) => {
+        void Promise.all([
+            imageViewerProvider.updateImages(items),
+            imageEditorManager.updateItems(items),
+        ]);
+    });
+
+    context.subscriptions.push(
+        sessionManager.onDidContinue(() => {
+            imageViewerProvider.invalidateDisplay();
+            imageEditorManager.invalidateDisplays();
+        }),
+        sessionManager.onDidChangeSession(() => {
+            imageViewerProvider.invalidateDisplay();
+            imageEditorManager.invalidateDisplays();
+        })
+    );
+
     // Sync view states between sidebar and editor panels
     imageViewerProvider.onDidChangeViewState((state) => {
         imageEditorManager.syncViewState('sidebar', state);
@@ -118,8 +135,12 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((e) => {
             if (e.affectsConfiguration('imview')) {
+                ImageParserRegistry.getInstance().reloadConfiguration();
                 imageViewerProvider.reloadConfiguration();
                 imageEditorManager.reloadConfiguration();
+                if (sessionManager.isPaused) {
+                    void imageListProvider.refresh();
+                }
             }
         })
     );
@@ -129,7 +150,6 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(imageListProvider);
     context.subscriptions.push(imageViewerProvider);
     context.subscriptions.push(imageEditorManager);
-    context.subscriptions.push(debugVariableDecorator);
 
     console.log('ImView extension activated');
 }
@@ -208,13 +228,6 @@ function registerCommands(context: vscode.ExtensionContext): void {
                 }
             }
         )
-    );
-
-    // Copy pixel value
-    context.subscriptions.push(
-        vscode.commands.registerCommand('imview.copyPixelValue', async () => {
-            // This is triggered from the webview via message
-        })
     );
 
     // Add watch from selection (context menu in editor)
@@ -359,67 +372,14 @@ async function visualizeDebugVariable(debugVariable?: unknown, openInEditor: boo
         cancellable: false
     }, async (progress) => {
         try {
-            // Evaluate the expression
-            progress.report({ message: 'Evaluating expression...' });
-            const evalResult = await sessionManager.evaluate(expression!);
-
-            if (!evalResult) {
-                vscode.window.showErrorMessage(`Failed to evaluate "${expression}". Make sure the variable is in scope.`);
-                return;
-            }
-
-            const actualTypeName = evalResult.type || typeName || '';
-            const normalizedType = normalizeTypeName(actualTypeName);
-
-            // Check if it's a known image type
-            if (!isKnownImageType(normalizedType)) {
-                // Ask user if they want to try anyway
-                const choice = await vscode.window.showWarningMessage(
-                    `"${actualTypeName || 'unknown type'}" is not a recognized image type (cv::Mat, etc.). Try to visualize anyway?`,
-                    'Try Anyway', 'Cancel'
-                );
-                if (choice !== 'Try Anyway') {
-                    return;
-                }
-            }
-
-            // Find parser
-            const registry = ImageParserRegistry.getInstance();
-            const parser = registry.findParser(normalizedType);
-
-            if (!parser) {
-                vscode.window.showErrorMessage(
-                    `No parser available for type: ${actualTypeName || 'unknown'}\n` +
-                    'Supported types: cv::Mat, cv::Mat_<T>, cv::Matx, CvMat, IplImage.\n' +
-                    'You can configure custom types in settings.'
-                );
-                return;
-            }
-
-            // Parse the image
             progress.report({ message: 'Parsing image structure...' });
-            const parseResult = await parser.parse(sessionManager, expression!, evalResult);
-
-            if (!parseResult.success || !parseResult.metadata) {
+            const imageItem = await imageListProvider.resolveImageItem(expression!, false);
+            if (!imageItem.metadata) {
                 vscode.window.showErrorMessage(
-                    `Failed to parse image "${expression}": ${parseResult.error || 'Unknown error'}`
+                    `Failed to parse image "${expression}": ${imageItem.error ?? typeName ?? 'Unknown error'}`
                 );
                 return;
             }
-
-            // Create ImageItem
-            const imageItem: ImageItem = {
-                id: `quick_${Date.now()}_${expression}`,
-                label: expression!,
-                description: `${parseResult.metadata.width}×${parseResult.metadata.height} ${parseResult.metadata.typeName}`,
-                tooltip: `${expression}: ${actualTypeName}`,
-                expression: expression!,
-                isWatch: true,  // Mark as watch item
-                metadata: parseResult.metadata
-            };
-
-            // Also add to watch list (if not already there)
-            await imageListProvider.addWatch(expression!);
 
             // Display the image
             progress.report({ message: 'Reading image data...' });
@@ -434,13 +394,6 @@ async function visualizeDebugVariable(debugVariable?: unknown, openInEditor: boo
                 } catch {
                     // Ignore focus errors
                 }
-            }
-
-            // Show warnings if any
-            if (parseResult.warnings && parseResult.warnings.length > 0) {
-                vscode.window.showWarningMessage(
-                    `Image loaded with warnings: ${parseResult.warnings.join(', ')}`
-                );
             }
 
         } catch (error) {

@@ -85,9 +85,13 @@ export class CvMatParser extends BaseImageParser {
             }
 
             // Check for null pointer
-            if (dataAddress === '0x0' || dataAddress === '0x00000000' || dataAddress === '0x0000000000000000') {
+            if (this.isNullPointerValue(dataAddress)) {
                 return this.errorResult('cv::Mat data pointer is null (empty matrix)');
             }
+
+            // Check continuous flag before deciding whether a packed-stride fallback is safe.
+            const CV_MAT_CONT_FLAG = 1 << 14;
+            const isContinuous = (flags & CV_MAT_CONT_FLAG) !== 0;
 
             // Get step (stride) - step is an array, we need step[0]
             let stride: number | undefined;
@@ -119,15 +123,14 @@ export class CvMatParser extends BaseImageParser {
                 stride = await this.evaluateAsInt(session, `${stepExpression}[0]`);
             }
 
-            // Fallback: calculate from width and pixel size
+            // A packed fallback is correct only for a continuous matrix. For an ROI or
+            // externally backed Mat, guessing here silently shifts every row.
             if (stride === undefined) {
-                const pixelSize = PixelDepthSize[depth] * channels;
-                stride = cols * pixelSize;
+                if (!isContinuous) {
+                    return this.errorResult('Failed to read row stride for non-continuous cv::Mat');
+                }
+                stride = cols * PixelDepthSize[depth] * channels;
             }
-
-            // Check continuous flag
-            const CV_MAT_CONT_FLAG = 1 << 14;
-            const isContinuous = (flags & CV_MAT_CONT_FLAG) !== 0;
 
             const validationError = this.getImageValidationError(cols, rows, channels, depth, stride);
             if (validationError) {

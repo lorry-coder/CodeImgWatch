@@ -1,35 +1,5 @@
-/**
- * Token types for expression parsing
- */
-enum TokenType {
-    IDENTIFIER = 'IDENTIFIER',
-    OPERATOR = 'OPERATOR',
-    NUMBER = 'NUMBER',
-    STRING = 'STRING',
-    LPAREN = 'LPAREN',
-    RPAREN = 'RPAREN',
-    COMMA = 'COMMA',
-    AT = 'AT',
-    EOF = 'EOF',
-}
-
-/**
- * Token structure
- */
-interface Token {
-    type: TokenType;
-    value: string;
-    position: number;
-}
-
-/**
- * AST node types
- */
-export type ExpressionNode =
-    | VariableNode
-    | OperatorNode
-    | NumberNode
-    | StringNode;
+/** AST nodes used by ImView watch expressions. */
+export type ExpressionNode = VariableNode | OperatorNode | NumberNode | StringNode;
 
 export interface VariableNode {
     type: 'variable';
@@ -52,9 +22,6 @@ export interface StringNode {
     value: string;
 }
 
-/**
- * Parse result
- */
 export interface ParseExpressionResult {
     success: boolean;
     ast?: ExpressionNode;
@@ -62,238 +29,41 @@ export interface ParseExpressionResult {
     position?: number;
 }
 
-/**
- * Tokenizer for image expressions
- */
-class Tokenizer {
-    private input: string;
-    private position: number = 0;
-    private tokens: Token[] = [];
-
-    constructor(input: string) {
-        this.input = input;
-    }
-
-    tokenize(): Token[] {
-        while (this.position < this.input.length) {
-            this.skipWhitespace();
-            if (this.position >= this.input.length) {
-                break;
-            }
-
-            const char = this.input[this.position];
-
-            if (char === '@') {
-                this.tokens.push({ type: TokenType.AT, value: '@', position: this.position });
-                this.position++;
-            } else if (char === '(') {
-                this.tokens.push({ type: TokenType.LPAREN, value: '(', position: this.position });
-                this.position++;
-            } else if (char === ')') {
-                this.tokens.push({ type: TokenType.RPAREN, value: ')', position: this.position });
-                this.position++;
-            } else if (char === ',') {
-                this.tokens.push({ type: TokenType.COMMA, value: ',', position: this.position });
-                this.position++;
-            } else if (char === '"' || char === "'") {
-                this.readString(char);
-            } else if (this.isDigit(char) || (char === '-' && this.isDigit(this.peek(1)))) {
-                this.readNumber();
-            } else if (this.isIdentifierStart(char)) {
-                this.readIdentifier();
-            } else {
-                // Unknown character, include it as part of identifier
-                this.readIdentifier();
-            }
-        }
-
-        this.tokens.push({ type: TokenType.EOF, value: '', position: this.position });
-        return this.tokens;
-    }
-
-    private skipWhitespace(): void {
-        while (this.position < this.input.length && /\s/.test(this.input[this.position])) {
-            this.position++;
-        }
-    }
-
-    private peek(offset: number = 0): string {
-        const pos = this.position + offset;
-        return pos < this.input.length ? this.input[pos] : '';
-    }
-
-    private isDigit(char: string): boolean {
-        return /[0-9]/.test(char);
-    }
-
-    private isIdentifierStart(char: string): boolean {
-        return /[a-zA-Z_]/.test(char);
-    }
-
-    private isIdentifierChar(char: string): boolean {
-        return /[-a-zA-Z0-9_:.<>&*]/.test(char) || char === '[' || char === ']';
-    }
-
-    private readString(quote: string): void {
-        const startPos = this.position;
-        this.position++; // Skip opening quote
-
-        let value = '';
-        while (this.position < this.input.length && this.input[this.position] !== quote) {
-            if (this.input[this.position] === '\\' && this.position + 1 < this.input.length) {
-                this.position++;
-                value += this.input[this.position];
-            } else {
-                value += this.input[this.position];
-            }
-            this.position++;
-        }
-
-        if (this.position < this.input.length) {
-            this.position++; // Skip closing quote
-        }
-
-        this.tokens.push({ type: TokenType.STRING, value, position: startPos });
-    }
-
-    private readNumber(): void {
-        const startPos = this.position;
-        let value = '';
-
-        if (this.input[this.position] === '-') {
-            value += '-';
-            this.position++;
-        }
-
-        // Check for hex
-        if (this.input[this.position] === '0' && (this.peek(1) === 'x' || this.peek(1) === 'X')) {
-            value += this.input[this.position++];
-            value += this.input[this.position++];
-            while (this.position < this.input.length && /[0-9a-fA-F]/.test(this.input[this.position])) {
-                value += this.input[this.position++];
-            }
-        } else {
-            // Decimal
-            while (this.position < this.input.length && this.isDigit(this.input[this.position])) {
-                value += this.input[this.position++];
-            }
-
-            // Decimal point
-            if (this.position < this.input.length && this.input[this.position] === '.') {
-                value += this.input[this.position++];
-                while (this.position < this.input.length && this.isDigit(this.input[this.position])) {
-                    value += this.input[this.position++];
-                }
-            }
-
-            // Exponent
-            if (this.position < this.input.length && /[eE]/.test(this.input[this.position])) {
-                value += this.input[this.position++];
-                if (this.position < this.input.length && /[+-]/.test(this.input[this.position])) {
-                    value += this.input[this.position++];
-                }
-                while (this.position < this.input.length && this.isDigit(this.input[this.position])) {
-                    value += this.input[this.position++];
-                }
-            }
-        }
-
-        this.tokens.push({ type: TokenType.NUMBER, value, position: startPos });
-    }
-
-    private readIdentifier(): void {
-        const startPos = this.position;
-        let value = '';
-        const isOperatorName = this.tokens[this.tokens.length - 1]?.type === TokenType.AT;
-
-        // Handle complex C++ expressions like arr[0], ptr->member, etc.
-        let parenDepth = 0;
-        let bracketDepth = 0;
-
-        while (this.position < this.input.length) {
-            const char = this.input[this.position];
-
-            if (isOperatorName && char === '(') {
-                break;
-            }
-
-            // Track nested parens/brackets
-            if (char === '(') {
-                parenDepth++;
-            }
-            if (char === ')') {
-                parenDepth--;
-            }
-            if (char === '[') {
-                bracketDepth++;
-            }
-            if (char === ']') {
-                bracketDepth--;
-            }
-
-            // Stop at top-level delimiters
-            if (parenDepth === 0 && bracketDepth === 0) {
-                if (char === ',' || char === ')' || char === '@') {
-                    break;
-                }
-            }
-
-            if (parenDepth < 0) {
-                break; // Unmatched closing paren
-            }
-
-            if (this.isIdentifierChar(char) || char === '(' || char === ')' || char === '[' || char === ']') {
-                value += char;
-                this.position++;
-            } else if (/\s/.test(char)) {
-                // Allow spaces within complex expressions
-                const remaining = this.input.slice(this.position).trimStart();
-                if (remaining.length > 0 && ['.', '-', '[', '<', '>'].includes(remaining[0])) {
-                    this.position++;
-                } else {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-
-        value = value.trim();
-        if (value.length > 0) {
-            this.tokens.push({ type: TokenType.IDENTIFIER, value, position: startPos });
-        }
+class ExpressionSyntaxError extends Error {
+    constructor(message: string, readonly position: number) {
+        super(`${message} at position ${position}`);
     }
 }
 
+interface Segment {
+    text: string;
+    offset: number;
+}
+
 /**
- * Parser for image expressions
+ * Parser for ImView expressions.
+ *
+ * Debugger expressions are deliberately treated as opaque variable nodes. This
+ * lets C++, Python, and custom debugger adapters use their native expression
+ * syntax while ImView only parses its own leading `@operator(...)` grammar.
  */
 export class ImageExpressionParser {
-    private tokens: Token[] = [];
-    private current: number = 0;
-
-    /**
-     * Parse an expression string
-     */
     parse(input: string): ParseExpressionResult {
         try {
-            const tokenizer = new Tokenizer(input.trim());
-            this.tokens = tokenizer.tokenize();
-            this.current = 0;
-
-            const ast = this.parseExpression();
-
-            // Check for remaining tokens
-            if (!this.isAtEnd()) {
-                return {
-                    success: false,
-                    error: `Unexpected token: ${this.peek().value}`,
-                    position: this.peek().position,
-                };
+            const leadingWhitespace = input.length - input.trimStart().length;
+            const text = input.trim();
+            if (!text) {
+                throw new ExpressionSyntaxError('Expression is empty', leadingWhitespace);
             }
 
-            return { success: true, ast };
+            return {
+                success: true,
+                ast: this.parseSegment({ text, offset: leadingWhitespace }),
+            };
         } catch (error) {
+            if (error instanceof ExpressionSyntaxError) {
+                return { success: false, error: error.message, position: error.position };
+            }
             return {
                 success: false,
                 error: error instanceof Error ? error.message : String(error),
@@ -301,122 +71,273 @@ export class ImageExpressionParser {
         }
     }
 
-    private parseExpression(): ExpressionNode {
-        // Check for operator (@name)
-        if (this.check(TokenType.AT)) {
-            return this.parseOperator();
+    private parseSegment(segment: Segment): ExpressionNode {
+        const trimmed = this.trimSegment(segment);
+        const { text, offset } = trimmed;
+
+        if (text.startsWith('@')) {
+            return this.parseOperator(trimmed);
         }
 
-        // Otherwise, it's a variable or literal
-        if (this.check(TokenType.NUMBER)) {
-            const token = this.advance();
-            return {
-                type: 'number',
-                value: parseFloat(token.value),
-            };
+        if (text.startsWith("'") || text.startsWith('"')) {
+            return this.parseString(trimmed);
         }
 
-        if (this.check(TokenType.STRING)) {
-            const token = this.advance();
-            return {
-                type: 'string',
-                value: token.value,
-            };
+        const number = this.parseNumber(text);
+        if (number !== undefined) {
+            return { type: 'number', value: number };
         }
 
-        if (this.check(TokenType.IDENTIFIER)) {
-            const token = this.advance();
-            return {
-                type: 'variable',
-                name: token.value,
-            };
+        if (this.looksLikeMalformedNumber(text)) {
+            throw new ExpressionSyntaxError(`Invalid number: ${text}`, offset);
         }
 
-        throw new Error(`Unexpected token: ${this.peek().type}`);
+        return { type: 'variable', name: text };
     }
 
-    private parseOperator(): OperatorNode {
-        this.consume(TokenType.AT, "Expected '@'");
+    private parseOperator(segment: Segment): OperatorNode {
+        const nameMatch = segment.text.match(/^@([A-Za-z_][A-Za-z0-9_-]*)/);
+        if (!nameMatch) {
+            throw new ExpressionSyntaxError("Expected operator name after '@'", segment.offset + 1);
+        }
 
-        // Get operator name
-        const nameToken = this.consume(TokenType.IDENTIFIER, "Expected operator name after '@'");
-        const name = nameToken.value;
+        const name = nameMatch[1];
+        let cursor = nameMatch[0].length;
+        while (/\s/.test(segment.text[cursor] ?? '')) {
+            cursor++;
+        }
+        if (segment.text[cursor] !== '(') {
+            throw new ExpressionSyntaxError(
+                `Expected '(' after operator name`,
+                segment.offset + cursor
+            );
+        }
 
-        // Parse arguments
-        this.consume(TokenType.LPAREN, "Expected '(' after operator name");
+        const closing = this.findMatchingParenthesis(segment.text, cursor, segment.offset);
+        const trailing = segment.text.slice(closing + 1).trim();
+        if (trailing) {
+            const trailingOffset = segment.text.indexOf(trailing, closing + 1);
+            throw new ExpressionSyntaxError('Unexpected text after operator', segment.offset + trailingOffset);
+        }
 
-        const args: ExpressionNode[] = [];
+        const body: Segment = {
+            text: segment.text.slice(cursor + 1, closing),
+            offset: segment.offset + cursor + 1,
+        };
+        const args = this.splitArguments(body).map(arg => this.parseSegment(arg));
+        return { type: 'operator', name, args };
+    }
 
-        if (!this.check(TokenType.RPAREN)) {
-            args.push(this.parseExpression());
+    private parseString(segment: Segment): StringNode {
+        const quote = segment.text[0];
+        let value = '';
+        let escaped = false;
 
-            while (this.check(TokenType.COMMA)) {
-                this.advance();
-                args.push(this.parseExpression());
+        for (let index = 1; index < segment.text.length; index++) {
+            const char = segment.text[index];
+            if (escaped) {
+                const escapes: Record<string, string> = {
+                    n: '\n',
+                    r: '\r',
+                    t: '\t',
+                    '\\': '\\',
+                    "'": "'",
+                    '"': '"',
+                };
+                value += escapes[char] ?? char;
+                escaped = false;
+            } else if (char === '\\') {
+                escaped = true;
+            } else if (char === quote) {
+                if (segment.text.slice(index + 1).trim()) {
+                    throw new ExpressionSyntaxError('Unexpected text after string', segment.offset + index + 1);
+                }
+                return { type: 'string', value };
+            } else {
+                value += char;
             }
         }
 
-        this.consume(TokenType.RPAREN, "Expected ')' after arguments");
-
-        return {
-            type: 'operator',
-            name,
-            args,
-        };
+        throw new ExpressionSyntaxError('Unterminated string', segment.offset);
     }
 
-    private check(type: TokenType): boolean {
-        if (this.isAtEnd()) {
+    private parseNumber(text: string): number | undefined {
+        if (/^-?0[xX][0-9a-fA-F]+$/.test(text)) {
+            const negative = text.startsWith('-');
+            const digits = text.replace(/^-?0[xX]/, '');
+            const value = Number.parseInt(digits, 16);
+            return negative ? -value : value;
+        }
+
+        if (/^-?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?$/.test(text)) {
+            const value = Number(text);
+            return Number.isFinite(value) ? value : undefined;
+        }
+        return undefined;
+    }
+
+    private looksLikeMalformedNumber(text: string): boolean {
+        return /^-?(?:0[xX]|\d+(?:\.\d*)?[eE][+-]?)$/.test(text);
+    }
+
+    private findMatchingParenthesis(text: string, opening: number, offset: number): number {
+        let depth = 0;
+        let quote: string | undefined;
+        let escaped = false;
+
+        for (let index = opening; index < text.length; index++) {
+            const char = text[index];
+            if (quote) {
+                if (escaped) {
+                    escaped = false;
+                } else if (char === '\\') {
+                    escaped = true;
+                } else if (char === quote) {
+                    quote = undefined;
+                }
+                continue;
+            }
+
+            if (char === "'" || char === '"') {
+                quote = char;
+            } else if (char === '(') {
+                depth++;
+            } else if (char === ')') {
+                depth--;
+                if (depth === 0) {
+                    return index;
+                }
+                if (depth < 0) {
+                    break;
+                }
+            }
+        }
+
+        if (quote) {
+            throw new ExpressionSyntaxError('Unterminated string', offset + opening);
+        }
+        throw new ExpressionSyntaxError("Expected ')' after arguments", offset + text.length);
+    }
+
+    private splitArguments(segment: Segment): Segment[] {
+        if (!segment.text.trim()) {
+            return [];
+        }
+
+        const args: Segment[] = [];
+        let start = 0;
+        let parenDepth = 0;
+        let bracketDepth = 0;
+        let braceDepth = 0;
+        let angleDepth = 0;
+        let quote: string | undefined;
+        let escaped = false;
+
+        const addArgument = (end: number): void => {
+            const raw = segment.text.slice(start, end);
+            if (!raw.trim()) {
+                throw new ExpressionSyntaxError('Expected expression', segment.offset + start);
+            }
+            args.push({ text: raw, offset: segment.offset + start });
+        };
+
+        for (let index = 0; index < segment.text.length; index++) {
+            const char = segment.text[index];
+            if (quote) {
+                if (escaped) {
+                    escaped = false;
+                } else if (char === '\\') {
+                    escaped = true;
+                } else if (char === quote) {
+                    quote = undefined;
+                }
+                continue;
+            }
+
+            if (char === "'" || char === '"') {
+                quote = char;
+            } else if (char === '(') {
+                parenDepth++;
+            } else if (char === ')') {
+                parenDepth--;
+            } else if (char === '[') {
+                bracketDepth++;
+            } else if (char === ']') {
+                bracketDepth--;
+            } else if (char === '{') {
+                braceDepth++;
+            } else if (char === '}') {
+                braceDepth--;
+            } else if (char === '<' && this.isLikelyTemplateOpening(segment.text, index)) {
+                angleDepth++;
+            } else if (char === '>' && angleDepth > 0) {
+                angleDepth--;
+            } else if (char === ',' && parenDepth === 0 && bracketDepth === 0 &&
+                braceDepth === 0 && angleDepth === 0) {
+                addArgument(index);
+                start = index + 1;
+            }
+
+            if (parenDepth < 0 || bracketDepth < 0 || braceDepth < 0) {
+                throw new ExpressionSyntaxError('Unmatched closing delimiter', segment.offset + index);
+            }
+        }
+
+        if (quote) {
+            throw new ExpressionSyntaxError('Unterminated string', segment.offset + segment.text.length);
+        }
+        if (parenDepth !== 0 || bracketDepth !== 0 || braceDepth !== 0 || angleDepth !== 0) {
+            throw new ExpressionSyntaxError('Unclosed delimiter', segment.offset + segment.text.length);
+        }
+
+        addArgument(segment.text.length);
+        return args;
+    }
+
+    /** Recognize conventional no-whitespace C++ template syntax without treating comparisons as delimiters. */
+    private isLikelyTemplateOpening(text: string, index: number): boolean {
+        const previous = text[index - 1];
+        const next = text[index + 1];
+        if (previous === undefined || next === undefined ||
+            !/[A-Za-z0-9_:>]/.test(previous) || !/[A-Za-z0-9_:]/.test(next)) {
             return false;
         }
-        return this.peek().type === type;
-    }
 
-    private advance(): Token {
-        if (!this.isAtEnd()) {
-            this.current++;
+        let depth = 1;
+        for (let cursor = index + 1; cursor < text.length; cursor++) {
+            if (text[cursor] === '<' &&
+                /[A-Za-z0-9_:>]/.test(text[cursor - 1] ?? '') &&
+                /[A-Za-z0-9_:]/.test(text[cursor + 1] ?? '')) {
+                depth++;
+            } else if (text[cursor] === '>') {
+                depth--;
+                if (depth === 0) {
+                    const following = text.slice(cursor + 1).trimStart()[0];
+                    return following === undefined || '(),>{}[].:&*-'.includes(following);
+                }
+            }
         }
-        return this.previous();
+        return false;
     }
 
-    private consume(type: TokenType, message: string): Token {
-        if (this.check(type)) {
-            return this.advance();
-        }
-        throw new Error(`${message} at position ${this.peek().position}`);
-    }
-
-    private peek(): Token {
-        return this.tokens[this.current];
-    }
-
-    private previous(): Token {
-        return this.tokens[this.current - 1];
-    }
-
-    private isAtEnd(): boolean {
-        return this.peek().type === TokenType.EOF;
+    private trimSegment(segment: Segment): Segment {
+        const leading = segment.text.length - segment.text.trimStart().length;
+        return {
+            text: segment.text.trim(),
+            offset: segment.offset + leading,
+        };
     }
 }
 
-/**
- * Check if an expression contains operators
- */
 export function hasOperators(expression: string): boolean {
-    return expression.includes('@');
+    return expression.trimStart().startsWith('@');
 }
 
-/**
- * Extract the base variable name from an expression
- */
 export function extractBaseVariable(expression: string): string {
-    const parser = new ImageExpressionParser();
-    const result = parser.parse(expression);
-
+    const result = new ImageExpressionParser().parse(expression);
     if (!result.success || !result.ast) {
         return expression;
     }
-
     return findFirstVariable(result.ast) ?? expression;
 }
 

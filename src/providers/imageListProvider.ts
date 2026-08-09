@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
-import { DebugSessionManager } from '../core/debugSessionManager';
-import { ImageParserRegistry, isKnownImageType, normalizeTypeName } from '../parsers/baseParser';
+import { DebugSessionManager, EvaluateResponse, VariableInfo } from '../core/debugSessionManager';
+import { resolveImageExpression } from '../core/imageResolver';
+import { ImageParserRegistry, normalizeTypeName } from '../parsers/baseParser';
 import { ImageItem } from '../types';
 
 /**
@@ -64,6 +65,7 @@ export class ImageListProvider implements vscode.TreeDataProvider<TreeItemType>,
     private localImages: ImageItem[] = [];
     private watchExpressions: string[] = [];
     private watchImages: ImageItem[] = [];
+    private refreshGeneration = 0;
 
     private _onDidChangeTreeData = new vscode.EventEmitter<TreeItemType | undefined | void>();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
@@ -72,12 +74,16 @@ export class ImageListProvider implements vscode.TreeDataProvider<TreeItemType>,
     private _onDidSelectImage = new vscode.EventEmitter<ImageItem>();
     readonly onDidSelectImage = this._onDidSelectImage.event;
 
+    private _onDidRefreshImages = new vscode.EventEmitter<readonly ImageItem[]>();
+    readonly onDidRefreshImages = this._onDidRefreshImages.event;
+
     constructor(private context: vscode.ExtensionContext) {
         this.sessionManager = DebugSessionManager.getInstance();
         this.parserRegistry = ImageParserRegistry.getInstance();
 
         // Load saved watch expressions
         this.watchExpressions = context.workspaceState.get<string[]>('imview.watchExpressions', []);
+        this.watchImages = this.createWatchPlaceholders('Waiting for debugger...');
 
         this.setupEventListeners();
     }
@@ -96,11 +102,12 @@ export class ImageListProvider implements vscode.TreeDataProvider<TreeItemType>,
         // Clear when session ends
         this.disposables.push(
             this.sessionManager.onDidChangeSession(session => {
-                if (!session) {
-                    this.localImages = [];
-                    this.watchImages = [];
-                    this._onDidChangeTreeData.fire();
-                }
+                this.localImages = [];
+                this.watchImages = this.createWatchPlaceholders(
+                    session ? 'Waiting for debugger to pause...' : 'Waiting for debugger...'
+                );
+                this.refreshGeneration++;
+                this._onDidChangeTreeData.fire();
             })
         );
 
@@ -109,14 +116,8 @@ export class ImageListProvider implements vscode.TreeDataProvider<TreeItemType>,
             this.sessionManager.onDidContinue(() => {
                 // Keep watch expressions but clear data
                 this.localImages = [];
-                this.watchImages = this.watchExpressions.map(expr => ({
-                    id: `watch_${expr}`,
-                    label: expr,
-                    description: 'Running...',
-                    tooltip: expr,
-                    expression: expr,
-                    isWatch: true,
-                }));
+                this.watchImages = this.createWatchPlaceholders('Running...');
+                this.refreshGeneration++;
                 this._onDidChangeTreeData.fire();
             })
         );
@@ -163,20 +164,30 @@ export class ImageListProvider implements vscode.TreeDataProvider<TreeItemType>,
             return;
         }
 
+        const generation = ++this.refreshGeneration;
+
         // Scan local variables
-        await this.scanLocalVariables();
+        const localImages = await this.scanLocalVariables();
 
         // Evaluate watch expressions
-        await this.evaluateWatchExpressions();
+        const watchImages = await this.evaluateWatchExpressions();
+
+        if (generation !== this.refreshGeneration) {
+            return;
+        }
+
+        this.localImages = localImages;
+        this.watchImages = watchImages;
 
         this._onDidChangeTreeData.fire();
+        this._onDidRefreshImages.fire(this.getAllImages());
     }
 
     /**
      * Scan local variables for image types
      */
-    private async scanLocalVariables(): Promise<void> {
-        this.localImages = [];
+    private async scanLocalVariables(): Promise<ImageItem[]> {
+        const images: ImageItem[] = [];
 
         try {
             const locals = await this.sessionManager.getLocalVariables();
@@ -185,125 +196,60 @@ export class ImageListProvider implements vscode.TreeDataProvider<TreeItemType>,
                 const typeName = variable.type ?? '';
                 const normalizedType = normalizeTypeName(typeName);
 
-                // Check if this is a known image type
-                if (isKnownImageType(normalizedType)) {
-                    const item = await this.createImageItem(
-                        variable.evaluateName ?? variable.name,
+                if (this.parserRegistry.findParser(normalizedType)) {
+                    const expression = variable.evaluateName ?? variable.name;
+                    const item = await this.resolveImageItem(
+                        expression,
+                        false,
                         variable.name,
-                        typeName,
-                        false
+                        this.toEvaluateResponse(variable)
                     );
-                    this.localImages.push(item);
+                    images.push(item);
                 }
             }
         } catch (error) {
             console.error('Failed to scan local variables:', error);
         }
+        return images;
     }
 
     /**
      * Evaluate all watch expressions
      */
-    private async evaluateWatchExpressions(): Promise<void> {
-        this.watchImages = [];
+    private async evaluateWatchExpressions(): Promise<ImageItem[]> {
+        const images: ImageItem[] = [];
 
         for (const expr of this.watchExpressions) {
-            const item = await this.createImageItemFromExpression(expr, true);
-            this.watchImages.push(item);
+            images.push(await this.resolveImageItem(expr, true));
         }
+        return images;
     }
 
     /**
      * Create an ImageItem from an expression
      */
-    private async createImageItemFromExpression(expression: string, isWatch: boolean): Promise<ImageItem> {
-        try {
-            const result = await this.sessionManager.evaluate(expression);
-
-            if (!result) {
-                return {
-                    id: `${isWatch ? 'watch' : 'local'}_${expression}`,
-                    label: expression,
-                    description: 'Failed to evaluate',
-                    tooltip: `Expression: ${expression}\nError: Failed to evaluate`,
-                    expression,
-                    isWatch,
-                    error: 'Failed to evaluate expression',
-                };
-            }
-
-            return this.createImageItem(expression, expression, result.type ?? '', isWatch);
-        } catch (error) {
-            return {
-                id: `${isWatch ? 'watch' : 'local'}_${expression}`,
-                label: expression,
-                description: 'Error',
-                tooltip: `Expression: ${expression}\nError: ${error}`,
-                expression,
-                isWatch,
-                error: String(error),
-            };
-        }
-    }
-
-    /**
-     * Create an ImageItem by parsing a variable
-     */
-    private async createImageItem(
+    async resolveImageItem(
         expression: string,
-        displayName: string,
-        typeName: string,
-        isWatch: boolean
+        isWatch: boolean,
+        displayName: string = expression,
+        evaluateResult?: EvaluateResponse
     ): Promise<ImageItem> {
         const id = `${isWatch ? 'watch' : 'local'}_${expression}`;
-
         try {
-            // Find parser for this type
-            const parser = this.parserRegistry.findParser(normalizeTypeName(typeName));
-
-            if (!parser) {
+            const resolved = await resolveImageExpression(this.sessionManager, expression, evaluateResult);
+            if (!resolved.success || !resolved.metadata) {
                 return {
                     id,
                     label: displayName,
-                    description: typeName,
-                    tooltip: `${expression}: ${typeName}\nNo parser available for this type`,
+                    description: resolved.error ?? 'Parse failed',
+                    tooltip: `${expression}\n${resolved.error ?? 'Parse failed'}`,
                     expression,
                     isWatch,
-                    error: 'No parser available',
+                    error: resolved.error,
                 };
             }
 
-            // Evaluate to get variables reference
-            const evalResult = await this.sessionManager.evaluate(expression);
-
-            if (!evalResult) {
-                return {
-                    id,
-                    label: displayName,
-                    description: 'Failed to evaluate',
-                    tooltip: `${expression}\nFailed to evaluate expression`,
-                    expression,
-                    isWatch,
-                    error: 'Failed to evaluate',
-                };
-            }
-
-            // Parse the image
-            const parseResult = await parser.parse(this.sessionManager, expression, evalResult);
-
-            if (!parseResult.success || !parseResult.metadata) {
-                return {
-                    id,
-                    label: displayName,
-                    description: parseResult.error ?? 'Parse failed',
-                    tooltip: `${expression}: ${typeName}\n${parseResult.error ?? 'Parse failed'}`,
-                    expression,
-                    isWatch,
-                    error: parseResult.error,
-                };
-            }
-
-            const meta = parseResult.metadata;
+            const meta = resolved.metadata;
             const description = `${meta.width}×${meta.height} ${meta.typeName}`;
             const tooltip = [
                 `${expression}`,
@@ -311,7 +257,7 @@ export class ImageListProvider implements vscode.TreeDataProvider<TreeItemType>,
                 `Type: ${meta.typeName}`,
                 `Channels: ${meta.channels}`,
                 `Address: ${meta.dataAddress}`,
-                parseResult.warnings?.map(w => `⚠ ${w}`).join('\n'),
+                resolved.warnings?.map(w => `⚠ ${w}`).join('\n'),
             ]
                 .filter(Boolean)
                 .join('\n');
@@ -324,6 +270,7 @@ export class ImageListProvider implements vscode.TreeDataProvider<TreeItemType>,
                 expression,
                 isWatch,
                 metadata: meta,
+                imageData: resolved.data,
             };
         } catch (error) {
             return {
@@ -336,6 +283,26 @@ export class ImageListProvider implements vscode.TreeDataProvider<TreeItemType>,
                 error: String(error),
             };
         }
+    }
+
+    private toEvaluateResponse(variable: VariableInfo): EvaluateResponse {
+        return {
+            result: variable.value,
+            type: variable.type,
+            variablesReference: variable.variablesReference,
+            memoryReference: variable.memoryReference,
+        };
+    }
+
+    private createWatchPlaceholders(description: string): ImageItem[] {
+        return this.watchExpressions.map(expression => ({
+            id: `watch_${expression}`,
+            label: expression,
+            description,
+            tooltip: expression,
+            expression,
+            isWatch: true,
+        }));
     }
 
     /**
@@ -353,6 +320,11 @@ export class ImageListProvider implements vscode.TreeDataProvider<TreeItemType>,
             return;
         }
 
+        expression = expression.trim();
+        if (!expression) {
+            return;
+        }
+
         if (this.watchExpressions.includes(expression)) {
             vscode.window.showInformationMessage(`"${expression}" is already in the watch list`);
             return;
@@ -363,7 +335,7 @@ export class ImageListProvider implements vscode.TreeDataProvider<TreeItemType>,
 
         // Evaluate and add to list if debugger is paused
         if (this.sessionManager.activeSession && this.sessionManager.isPaused) {
-            const item = await this.createImageItemFromExpression(expression, true);
+            const item = await this.resolveImageItem(expression, true);
             this.watchImages.push(item);
         } else {
             // Add placeholder item
@@ -424,5 +396,6 @@ export class ImageListProvider implements vscode.TreeDataProvider<TreeItemType>,
         this.disposables = [];
         this._onDidChangeTreeData.dispose();
         this._onDidSelectImage.dispose();
+        this._onDidRefreshImages.dispose();
     }
 }

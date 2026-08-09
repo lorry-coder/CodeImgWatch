@@ -1,6 +1,13 @@
 import { DebugSessionManager, EvaluateResponse } from '../core/debugSessionManager';
 import { BaseImageParser } from './baseParser';
-import { ParseResult, ImageMetadata, PixelDepth, PixelDepthSize, ChannelFormat } from '../types';
+import {
+    ParseResult,
+    ImageMetadata,
+    PixelDepth,
+    PixelDepthSize,
+    ChannelFormat,
+    decodeCvType,
+} from '../types';
 import { calculateDataSize } from '../utils/imageTransform';
 
 /**
@@ -93,8 +100,7 @@ export class CvMatTemplateParser extends BaseImageParser {
             } else {
                 // Fall back to flags
                 const cvType = flags & 0xFFF;
-                depth = cvType & 7;
-                channels = ((cvType >> 3) & 63) + 1;
+                ({ depth, channels } = decodeCvType(cvType));
             }
 
             // Get data pointer
@@ -111,9 +117,11 @@ export class CvMatTemplateParser extends BaseImageParser {
                 );
             }
 
-            if (!dataAddress || dataAddress === '0x0') {
+            if (!dataAddress || this.isNullPointerValue(dataAddress)) {
                 return this.errorResult('cv::Mat_<T> data pointer is null');
             }
+
+            const isContinuous = (flags & (1 << 14)) !== 0;
 
             // Get stride
             const stepExpression = this.getMemberExpression(expression, typeName, 'step');
@@ -125,8 +133,10 @@ export class CvMatTemplateParser extends BaseImageParser {
                 stride = await this.evaluateAsInt(session, `${stepExpression}[0]`);
             }
             if (stride === undefined) {
-                const pixelSize = PixelDepthSize[depth] * channels;
-                stride = cols * pixelSize;
+                if (!isContinuous) {
+                    return this.errorResult('Failed to read row stride for non-continuous cv::Mat_<T>');
+                }
+                stride = cols * PixelDepthSize[depth] * channels;
             }
 
             const validationError = this.getImageValidationError(cols, rows, channels, depth, stride);
@@ -155,7 +165,7 @@ export class CvMatTemplateParser extends BaseImageParser {
                 dataAddress,
                 dataSize: 0,
                 channelFormat,
-                isContinuous: (flags & (1 << 14)) !== 0,
+                isContinuous,
                 debuggerType: session.getDebuggerType(),
                 frameId: session.currentFrameId,
             };
