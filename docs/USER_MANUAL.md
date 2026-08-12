@@ -220,7 +220,7 @@ breakpoint()  # 或者在此行点击设置断点
 
 **方法二：从调试变量面板**
 1. 在调试侧边栏的 **VARIABLES** 或 **WATCH** 面板中找到图像变量
-2. 右键点击变量，选择 **"View Image"** 立即显示图像
+2. 右键点击变量，选择 **"View Image"**；插件会直接使用当前变量、加入 ImView Watch 并显示图像，无需再次输入变量名
 3. 或选择 **"Add to ImView"** 添加到监视列表
 
 **方法三：从代码编辑器**
@@ -233,7 +233,7 @@ breakpoint()  # 或者在此行点击设置断点
 
 ### 4.1 ImView 列表面板
 
-位于调试视图侧边栏，显示当前作用域中的图像变量。
+位于 VS Code 底部的 ImView 面板，显示当前作用域中的图像变量。
 
 ```
 ┌─────────────────────────────────────┐
@@ -260,7 +260,7 @@ breakpoint()  # 或者在此行点击设置断点
 
 ### 4.2 Image Viewer 查看器面板
 
-位于调试视图侧边栏，显示选中的图像内容。
+位于 VS Code 底部的 ImView 面板，显示选中的图像内容；也可手动拖到侧边栏。
 
 ```
 ┌─────────────────────────────────────────┐
@@ -295,7 +295,7 @@ breakpoint()  # 或者在此行点击设置断点
 
 ### 4.3 独立编辑器标签页
 
-双击列表中的图像，或右键选择 `Open in Editor Tab`，可在独立标签页中查看图像。
+右键列表中的图像并选择 `Open in Editor Tab`，可在独立标签页中查看图像；单击列表项会在 Image Viewer 中显示。
 
 独立标签页提供更多功能：
 - 更大的显示区域
@@ -350,7 +350,7 @@ obj.getImage()
 @band(color, 0)
 ```
 
-**持久化：** Watch 表达式会保存到工作区状态，下次打开项目时自动恢复。
+**持久化与状态：** Watch 表达式会保存到工作区状态，下次打开项目时自动恢复。未启动调试、程序运行中或暂停但尚未刷新时，条目会使用静态状态图标并给出操作提示，不会显示持续旋转的加载动画，也不会在后台求值。
 
 ### 5.3 图像查看与交互
 
@@ -430,8 +430,8 @@ obj.getImage()
 | `@scale` | `@scale(img, factor)` | 缩放像素值 |
 | `@thresh` | `@thresh(img, t)` | 二值化阈值处理 |
 | `@clamp` | `@clamp(img, min, max)` | 限制值域范围 |
-| `@norm8` | `@norm8(img)` | 除以 255 归一化 |
-| `@norm16` | `@norm16(img)` | 除以 65535 归一化 |
+| `@norm8` | `@norm8(img)` | 除以 255，输出 float32 |
+| `@norm16` | `@norm16(img)` | 除以 65535，输出 float32 |
 
 #### 几何变换操作符
 
@@ -448,6 +448,17 @@ obj.getImage()
 | 操作符 | 语法 | 功能 |
 |--------|------|------|
 | `@diff` | `@diff(img1, img2)` | 计算绝对差异 |
+
+#### 原始内存
+
+`@mem(address, type, channels, width, height[, stride])` 可直接查看调试进程中的原始缓冲区：
+
+```text
+@mem(0x12345678, uint8, 3, 640, 480)
+@mem(0x12345678, uint16, 1, 640, 480, 1280)
+```
+
+地址必须是非空十六进制指针，通道数为 1–4。省略 `stride` 时按紧密排列计算；读取前会校验尺寸、最小行步长和 `imview.maxImageBytes`。
 
 #### 操作符嵌套
 
@@ -477,7 +488,7 @@ obj.getImage()
 
 ### 5.7 图像导出
 
-右键点击图像列表项，选择 `Export Image`，支持以下格式：
+右键点击图像列表项，选择 `Export Image`。先在精简的格式选择器中选择 PNG、JPEG 或 Raw Binary，再在仅显示该格式的系统保存对话框中确认位置。插件会在当前 VS Code 会话中优先显示上次使用的格式，并记住上次导出目录。
 
 | 格式 | 扩展名 | 说明 |
 |------|--------|------|
@@ -487,15 +498,17 @@ obj.getImage()
 
 PNG/JPEG 会包含当前的归一化、色图、通道选择和 Alpha 处理结果，但不包含缩放、网格或像素检查覆盖层。JPEG 质量由 `imview.jpegQuality` 控制。
 
+所选格式决定实际编码。插件会补全缺失的后缀；如果手动输入了其他格式或不支持的后缀，也会改为所选格式的后缀，避免扩展名与文件内容不一致。`.jpeg` 与 `.jpg` 均会保留为 JPEG。
+
 **Binary 格式说明：**
-`.bin` 文件保留 `depth`、`channels` 和 `stride` 对应的字节布局。非连续 ROI 可能包含行间 padding；PyTorch CHW 数据会先转换为查看器使用的 HWC 布局。
+`.bin` 文件只包含未编码的显示缓冲字节，不嵌入尺寸、类型等头部元数据；其布局仍对应当前的 `depth`、`channels` 和 `stride`。非连续 ROI 可能包含行间 padding；PyTorch CHW 数据会先转换为查看器使用的 HWC 布局。
 
 ### 5.8 A/B 对比功能
 
 在编辑器标签页中，可以快速在两张图像间切换对比：
 
 1. 打开第一张图像
-2. 打开第二张图像（或点击其他图像）
+2. 使用 `Open in Editor Tab` 打开第二张图像；它会与上一次打开的图像组成当前标签页的 A/B 对
 3. 点击 `A/B` 按钮或按 `空格键` 切换显示
 
 视图状态（缩放、平移）在切换时保持不变，便于精确对比。
@@ -526,6 +539,7 @@ NumPy 数组是 Python 中最常用的图像格式，也是 OpenCV-Python 和 sc
 | `int32` | 整数图像 |
 | `float32` | 浮点图像 |
 | `float64` | 双精度浮点 |
+| `float16` | 半精度浮点 |
 
 #### PIL.Image.Image
 
@@ -541,7 +555,7 @@ Pillow 图像对象，支持多种模式：
 
 #### torch.Tensor
 
-PyTorch 张量会通过连续的 NumPy 缓冲区传输；CUDA 等加速器上的张量会先复制到 CPU。
+PyTorch 张量会转换为连续 CPU 存储，再直接读取原始字节；此路径不依赖 NumPy ABI。CUDA、MPS 等加速器上的张量会先复制到 CPU。
 
 | 维度 | 格式 | 说明 |
 |------|------|------|
@@ -651,6 +665,7 @@ cv::Vec4b pixel;
 | `data` | string | 数据指针成员表达式 |
 | `stride` | string | 行步长表达式，`"auto"` 表示自动计算 |
 | `pixelType` | string | 像素类型：`uint8`, `int8`, `uint16`, `int16`, `int32`, `float32`, `float64` |
+| `isValid` | string | 可选的缓冲区有效性布尔表达式 |
 
 ---
 
@@ -666,7 +681,6 @@ cv::Vec4b pixel;
 | `imview.maxImageBytes` | `268435456` | 单张图像最大调试器传输字节数 |
 | `imview.numpyChannelOrder` | `"bgr"` | NumPy 三/四通道数组的默认通道顺序 |
 | `imview.jpegQuality` | `0.92` | JPEG 导出质量（0.1–1.0） |
-| `imview.thumbnailSize` | `64` | 缩略图大小 |
 | `imview.autoNormalize` | `true` | 自动归一化非 8-bit 图像 |
 | `imview.showPixelGrid` | `true` | 高缩放时显示像素网格 |
 | `imview.pixelGridZoomThreshold` | `8` | 显示像素网格的最小缩放倍数 |
@@ -703,7 +717,7 @@ cv::Vec4b pixel;
 | `3` | 查看蓝色通道 |
 | `4` | 查看 Alpha 通道 |
 | `空格` | A/B 对比切换 |
-| `Ctrl+C` | 复制当前像素值 |
+| `Ctrl+C` / `Cmd+C` | 复制当前像素值 |
 | `滚轮` | 缩放 |
 | `拖拽` | 平移 |
 | `双击` | 重置视图 |

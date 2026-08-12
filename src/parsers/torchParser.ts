@@ -54,7 +54,9 @@ export class TorchTensorParser extends BaseImageParser {
     readonly priority = 95; // Between numpy and PIL
 
     canParse(typeName: string): boolean {
-        return /\bTensor\b/.test(typeName) || /torch\.Tensor/.test(typeName);
+        return /\bTensor\b/.test(typeName) ||
+               /torch\.Tensor/.test(typeName) ||
+               /(?:^|\.)Parameter$/.test(typeName);
     }
 
     async parse(
@@ -62,14 +64,37 @@ export class TorchTensorParser extends BaseImageParser {
         expression: string
     ): Promise<ParseResult> {
         try {
+            const sourceExpression = `(${expression})`;
+
             // Check if tensor is on CPU
-            const deviceStr = await session.evaluatePythonAsString(`str(${expression}.device)`);
+            const deviceStr = await session.evaluatePythonAsString(`str(${sourceExpression}.device)`);
             if (!deviceStr) {
                 return this.errorResult('Failed to get tensor device');
             }
+            if (deviceStr.toLowerCase().split(':', 1)[0] === 'meta') {
+                return this.errorResult('Meta tensors do not contain pixel data and cannot be displayed');
+            }
+
+            const layoutStr = await session.evaluatePythonAsString(`str(${sourceExpression}.layout)`);
+            if (!layoutStr) {
+                return this.errorResult('Failed to get tensor layout');
+            }
+            if (layoutStr !== 'torch.strided' && layoutStr !== 'strided') {
+                return this.errorResult(`Unsupported tensor layout: ${layoutStr} (expected torch.strided)`);
+            }
+
+            const isQuantizedStr = await session.evaluatePythonAsString(
+                `str(${sourceExpression}.is_quantized)`
+            );
+            if (!isQuantizedStr) {
+                return this.errorResult('Failed to determine whether tensor is quantized');
+            }
+            if (isQuantizedStr.toLowerCase() === 'true') {
+                return this.errorResult('Quantized tensors are not supported; call dequantize() before display');
+            }
 
             // Get shape
-            const shapeResult = await session.evaluatePythonAsTuple(`tuple(${expression}.shape)`);
+            const shapeResult = await session.evaluatePythonAsTuple(`tuple(${sourceExpression}.shape)`);
             if (!shapeResult || shapeResult.length === 0) {
                 return this.errorResult('Failed to get tensor shape');
             }
@@ -99,7 +124,7 @@ export class TorchTensorParser extends BaseImageParser {
                 }
             } else if (shapeResult.length === 4) {
                 const [, first, second, third] = shapeResult;
-                actualExpression = `${expression}[0]`;
+                actualExpression = `${sourceExpression}[0]`;
                 if (first <= 4) {
                     channels = first;
                     height = second;
@@ -123,7 +148,7 @@ export class TorchTensorParser extends BaseImageParser {
             }
 
             // Get dtype
-            const dtypeResult = await session.evaluatePythonAsString(`str(${expression}.dtype)`);
+            const dtypeResult = await session.evaluatePythonAsString(`str(${sourceExpression}.dtype)`);
             if (!dtypeResult) {
                 return this.errorResult('Failed to get tensor dtype');
             }
@@ -136,7 +161,9 @@ export class TorchTensorParser extends BaseImageParser {
             const { depth } = dtypeInfo;
 
             // Check if tensor is contiguous
-            const isContiguousStr = await session.evaluatePythonAsString(`str(${actualExpression}.is_contiguous())`);
+            const isContiguousStr = await session.evaluatePythonAsString(
+                `str((${actualExpression}).is_contiguous())`
+            );
             const isContinuous = isContiguousStr === 'True';
 
             // Calculate stride and data size
@@ -225,19 +252,8 @@ export class TorchTensorParser extends BaseImageParser {
      * Parse PyTorch dtype string to PixelDepth
      */
     private parseTorchDtype(dtype: string): TorchDtypeInfo | undefined {
-        // Direct match
-        if (dtype in TORCH_DTYPE_MAP) {
-            return TORCH_DTYPE_MAP[dtype];
-        }
-
-        // Normalize and try again
-        const normalized = dtype.toLowerCase();
-        for (const [key, value] of Object.entries(TORCH_DTYPE_MAP)) {
-            if (normalized === key.toLowerCase() || normalized.includes(key.replace('torch.', ''))) {
-                return value;
-            }
-        }
-
-        return undefined;
+        // Match complete dtype names only. Substring matching misclassifies
+        // unsigned, quantized, and float8 dtypes as similarly named entries.
+        return TORCH_DTYPE_MAP[dtype.trim().toLowerCase()];
     }
 }

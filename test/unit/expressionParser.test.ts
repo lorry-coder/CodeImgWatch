@@ -103,6 +103,32 @@ describe('ImageExpressionParser', () => {
             if (result.ast?.type === 'operator') {
                 assert.strictEqual(result.ast.name, 'mem');
                 assert.strictEqual(result.ast.args.length, 5);
+                assert.strictEqual(result.ast.args[0].type, 'number');
+                if (result.ast.args[0].type === 'number') {
+                    assert.strictEqual(result.ast.args[0].value, 0x12345678);
+                }
+            }
+        });
+
+        it('preserves native debugger expressions with arithmetic and calls', () => {
+            const result = parser.parse('@abs(get_frame(index + 1))');
+            assert.strictEqual(result.success, true, result.error);
+            if (result.ast?.type === 'operator' && result.ast.args[0].type === 'variable') {
+                assert.strictEqual(result.ast.args[0].name, 'get_frame(index + 1)');
+            } else {
+                assert.fail('Expected an operator with a variable argument');
+            }
+        });
+
+        it('preserves commas inside nested C++ template arguments', () => {
+            const expression = 'get<std::array<cv::Vec<unsigned char,3>,2>>()';
+            const result = parser.parse(`@band(${expression}, 1)`);
+            assert.strictEqual(result.success, true, result.error);
+            if (result.ast?.type === 'operator' && result.ast.args[0].type === 'variable') {
+                assert.strictEqual(result.ast.args.length, 2);
+                assert.strictEqual(result.ast.args[0].name, expression);
+            } else {
+                assert.fail('Expected a template expression followed by a channel argument');
             }
         });
     });
@@ -147,6 +173,20 @@ describe('ImageExpressionParser', () => {
         it('should return error for missing operator name', () => {
             const result = parser.parse('@(img)');
             assert.strictEqual(result.success, false);
+        });
+
+        it('rejects unterminated strings and malformed numeric literals', () => {
+            assert.strictEqual(parser.parse('@file("test.png)').success, false);
+            assert.strictEqual(parser.parse('@scale(img, 1e)').success, false);
+            assert.strictEqual(parser.parse('@mem(0x, uint8, 1, 2, 2)').success, false);
+        });
+
+        it('accepts native operators without hanging', () => {
+            const result = parser.parse('@abs(image + offset)');
+            assert.strictEqual(result.success, true, result.error);
+            if (result.ast?.type === 'operator' && result.ast.args[0].type === 'variable') {
+                assert.strictEqual(result.ast.args[0].name, 'image + offset');
+            }
         });
     });
 });

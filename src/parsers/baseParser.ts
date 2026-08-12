@@ -29,6 +29,9 @@ export interface IImageParser {
         expression: string,
         evaluateResult: EvaluateResponse
     ): Promise<ParseResult>;
+
+    /** Reload parser-specific workspace configuration, if applicable. */
+    reloadConfiguration?(): void;
 }
 
 /**
@@ -68,6 +71,13 @@ export class ImageParserRegistry {
      */
     public getAllParsers(): IImageParser[] {
         return [...this.parsers];
+    }
+
+    /** Reload configuration-backed parsers without rebuilding the registry. */
+    public reloadConfiguration(): void {
+        for (const parser of this.parsers) {
+            parser.reloadConfiguration?.();
+        }
     }
 
     /**
@@ -136,9 +146,9 @@ export abstract class BaseImageParser implements IImageParser {
      */
     protected parsePointerValue(value: string): string | undefined {
         // Match hex address
-        const hexMatch = value.match(/0x[0-9a-fA-F]+/);
+        const hexMatch = value.match(/0[xX][0-9a-fA-F]+/);
         if (hexMatch) {
-            return hexMatch[0];
+            return `0x${hexMatch[0].slice(2)}`;
         }
 
         // Plain hex without prefix
@@ -217,9 +227,24 @@ export abstract class BaseImageParser implements IImageParser {
         return undefined;
     }
 
+    /** Return whether a numeric pointer representation is null. */
+    protected isNullPointerValue(value: string): boolean {
+        const normalized = value.trim();
+        if (normalized === '0' || normalized.toLowerCase() === 'nullptr') {
+            return true;
+        }
+        const hexMatch = normalized.match(/^0[xX]([0-9a-fA-F]+)$/);
+        return hexMatch !== null && /^0+$/.test(hexMatch[1]);
+    }
+
     /** Build member access for values/references and pointer expressions. */
     protected getMemberExpression(expression: string, typeName: string, memberName: string): string {
-        const access = /\*(?:\s+const)?\s*$/.test(typeName.trim()) ? '->' : '.';
+        const withoutQualifiers = typeName
+            .replace(/\b(?:const|volatile)\b/g, ' ')
+            .replace(/\b__(?:ptr64|restrict)\b/g, ' ')
+            .trim();
+        const withoutReferences = withoutQualifiers.replace(/&+\s*$/, '').trim();
+        const access = /\*\s*$/.test(withoutReferences) ? '->' : '.';
         return `(${expression})${access}${memberName}`;
     }
 
@@ -231,41 +256,7 @@ export abstract class BaseImageParser implements IImageParser {
         depth: PixelDepth,
         stride: number
     ): string | undefined {
-        const config = vscode.workspace.getConfiguration('imview');
-        const configuredMaxDimension = config.get<number>('maxImageSize', 4096);
-        const maxDimension = Number.isFinite(configuredMaxDimension) && configuredMaxDimension > 0
-            ? Math.floor(configuredMaxDimension)
-            : 4096;
-        const configuredMaxBytes = config.get<number>('maxImageBytes', 256 * 1024 * 1024);
-        const maxBytes = Number.isFinite(configuredMaxBytes) && configuredMaxBytes > 0
-            ? Math.floor(configuredMaxBytes)
-            : 256 * 1024 * 1024;
-
-        if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) {
-            return `Invalid image dimensions: ${width}x${height}`;
-        }
-        if (width > maxDimension || height > maxDimension) {
-            return `Image dimensions ${width}x${height} exceed imview.maxImageSize (${maxDimension})`;
-        }
-        if (!Number.isSafeInteger(channels) || channels < 1 || channels > 4) {
-            return `Unsupported channel count: ${channels} (expected 1-4)`;
-        }
-
-        const bytesPerElement = PixelDepthSize[depth];
-        if (!bytesPerElement) {
-            return `Unsupported pixel depth: ${depth}`;
-        }
-
-        const rowSize = width * channels * bytesPerElement;
-        if (!Number.isSafeInteger(stride) || stride < rowSize) {
-            return `Invalid row stride: ${stride} bytes (minimum ${rowSize})`;
-        }
-
-        const dataSize = (height - 1) * stride + rowSize;
-        if (!Number.isSafeInteger(dataSize) || dataSize <= 0 || dataSize > maxBytes) {
-            return `Image requires ${dataSize} bytes; imview.maxImageBytes is ${maxBytes}`;
-        }
-        return undefined;
+        return getImageValidationError(width, height, channels, depth, stride);
     }
 
     /**
@@ -306,37 +297,82 @@ export function isKnownImageType(typeName: string): boolean {
         /cv::Mat\b/,
         /cv::Mat_</,
         /cv::Matx</,
+        /cv::Vec(?:<|\d)/,
         /\bCvMat\b/,
         /\bIplImage\b/,
         // Python image types
         /\bndarray\b/,           // numpy.ndarray
-        /\barray\b/,             // debugpy shows numpy arrays as "array"
         /\bImage\b/,             // PIL.Image.Image
+        /\b(?:[A-Za-z_]\w*)?ImageFile\b/, // Pillow concrete image subclasses
         /\bTensor\b/,            // torch.Tensor
         /numpy\.ndarray/,
         /PIL\.Image/,
         /torch\.Tensor/,
     ];
 
-    return knownPatterns.some(pattern => pattern.test(typeName));
+    if (knownPatterns.some(pattern => pattern.test(typeName))) {
+        return true;
+    }
+
+    // Configuration-backed parsers (notably custom C++ image types) cannot be
+    // represented by a fixed pattern list. Consult the registry as a fallback.
+    return ImageParserRegistry.getInstance().findParser(normalizeTypeName(typeName)) !== undefined;
 }
 
 /**
  * Normalize a type name for comparison
  */
 export function normalizeTypeName(typeName: string): string {
-    // Remove leading/trailing whitespace
-    let normalized = typeName.trim();
-
-    // Remove const qualifiers
-    normalized = normalized.replace(/\bconst\s+/g, '');
-    normalized = normalized.replace(/\s+const\b/g, '');
-
-    // Remove reference/pointer suffixes for base type comparison
-    normalized = normalized.replace(/\s*[&*]+\s*$/, '');
-
-    // Remove class/struct keywords
+    let normalized = typeName
+        .replace(/\b(?:const|volatile)\b/g, ' ')
+        .replace(/\b__(?:ptr64|restrict)\b/g, ' ')
+        .trim();
     normalized = normalized.replace(/^(class|struct)\s+/, '');
-
+    normalized = normalized.replace(/(?:\s*[*&])+\s*$/, '').trim();
     return normalized;
+}
+
+/** Validate image shape and transfer size using the shared workspace limits. */
+export function getImageValidationError(
+    width: number,
+    height: number,
+    channels: number,
+    depth: PixelDepth,
+    stride: number
+): string | undefined {
+    const config = vscode.workspace.getConfiguration('imview');
+    const configuredMaxDimension = config.get<number>('maxImageSize', 4096);
+    const maxDimension = Number.isFinite(configuredMaxDimension) && configuredMaxDimension > 0
+        ? Math.floor(configuredMaxDimension)
+        : 4096;
+    const configuredMaxBytes = config.get<number>('maxImageBytes', 256 * 1024 * 1024);
+    const maxBytes = Number.isFinite(configuredMaxBytes) && configuredMaxBytes > 0
+        ? Math.floor(configuredMaxBytes)
+        : 256 * 1024 * 1024;
+
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0) {
+        return `Invalid image dimensions: ${width}x${height}`;
+    }
+    if (width > maxDimension || height > maxDimension) {
+        return `Image dimensions ${width}x${height} exceed imview.maxImageSize (${maxDimension})`;
+    }
+    if (!Number.isSafeInteger(channels) || channels < 1 || channels > 4) {
+        return `Unsupported channel count: ${channels} (expected 1-4)`;
+    }
+
+    const bytesPerElement = PixelDepthSize[depth];
+    if (!bytesPerElement) {
+        return `Unsupported pixel depth: ${depth}`;
+    }
+
+    const rowSize = width * channels * bytesPerElement;
+    if (!Number.isSafeInteger(rowSize) || !Number.isSafeInteger(stride) || stride < rowSize) {
+        return `Invalid row stride: ${stride} bytes (minimum ${rowSize})`;
+    }
+
+    const dataSize = (height - 1) * stride + rowSize;
+    if (!Number.isSafeInteger(dataSize) || dataSize <= 0 || dataSize > maxBytes) {
+        return `Image requires ${dataSize} bytes; imview.maxImageBytes is ${maxBytes}`;
+    }
+    return undefined;
 }

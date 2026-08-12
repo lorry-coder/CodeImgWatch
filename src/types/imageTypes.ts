@@ -117,8 +117,14 @@ export interface ImageItem {
     /** Whether this is a watch expression (vs local variable) */
     isWatch: boolean;
 
+    /** Why a persisted watch is not currently available for inspection */
+    availability?: 'inactive' | 'running' | 'paused';
+
     /** Associated metadata if available */
     metadata?: ImageMetadata;
+
+    /** Materialized pixels for derived expressions that do not map to debuggee memory */
+    imageData?: ImageData;
 
     /** Thumbnail data URL if available */
     thumbnail?: string;

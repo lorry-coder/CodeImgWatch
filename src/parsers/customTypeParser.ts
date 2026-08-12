@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { DebugSessionManager, EvaluateResponse } from '../core/debugSessionManager';
-import { BaseImageParser } from './baseParser';
+import { BaseImageParser, normalizeTypeName } from './baseParser';
 import {
     ParseResult,
     ImageMetadata,
@@ -10,6 +10,7 @@ import {
     createTypePattern,
     validateCustomTypeConfig,
 } from '../types';
+import { calculateDataSize } from '../utils/imageTransform';
 
 /**
  * Parser for user-defined custom image types
@@ -45,6 +46,11 @@ export class CustomTypeParser extends BaseImageParser {
         }
     }
 
+    /** Reload custom type definitions after workspace configuration changes. */
+    reloadConfiguration(): void {
+        this.loadConfigs();
+    }
+
     /**
      * Add a custom type config programmatically
      */
@@ -56,7 +62,7 @@ export class CustomTypeParser extends BaseImageParser {
     }
 
     canParse(typeName: string): boolean {
-        const normalized = typeName.replace(/^(const\s+)?(class\s+|struct\s+)?/, '').trim();
+        const normalized = normalizeTypeName(typeName);
 
         for (const [, pattern] of this.configPatterns) {
             if (pattern.test(normalized)) {
@@ -70,7 +76,7 @@ export class CustomTypeParser extends BaseImageParser {
      * Find matching config for a type name
      */
     private findConfig(typeName: string): CustomTypeConfig | undefined {
-        const normalized = typeName.replace(/^(const\s+)?(class\s+|struct\s+)?/, '').trim();
+        const normalized = normalizeTypeName(typeName);
 
         for (const config of this.configs) {
             const pattern = this.configPatterns.get(config.typeName);
@@ -93,15 +99,22 @@ export class CustomTypeParser extends BaseImageParser {
 
         try {
             const props = config.properties;
+            const typeName = evaluateResult.type ?? '';
 
             // Evaluate width
-            const width = await this.evaluateAsInt(session, `${expression}.${props.width}`);
+            const width = await this.evaluateAsInt(
+                session,
+                this.getMemberExpression(expression, typeName, props.width)
+            );
             if (width === undefined || width <= 0) {
                 return this.errorResult(`Failed to read width from ${props.width}`);
             }
 
             // Evaluate height
-            const height = await this.evaluateAsInt(session, `${expression}.${props.height}`);
+            const height = await this.evaluateAsInt(
+                session,
+                this.getMemberExpression(expression, typeName, props.height)
+            );
             if (height === undefined || height <= 0) {
                 return this.errorResult(`Failed to read height from ${props.height}`);
             }
@@ -111,7 +124,10 @@ export class CustomTypeParser extends BaseImageParser {
             if (typeof props.channels === 'number') {
                 channels = props.channels;
             } else {
-                const evalChannels = await this.evaluateAsInt(session, `${expression}.${props.channels}`);
+                const evalChannels = await this.evaluateAsInt(
+                    session,
+                    this.getMemberExpression(expression, typeName, props.channels)
+                );
                 if (evalChannels === undefined || evalChannels <= 0) {
                     return this.errorResult(`Failed to read channels from ${props.channels}`);
                 }
@@ -119,8 +135,11 @@ export class CustomTypeParser extends BaseImageParser {
             }
 
             // Get data pointer
-            const dataAddress = await this.evaluateAsPointer(session, `${expression}.${props.data}`);
-            if (!dataAddress || dataAddress === '0x0') {
+            const dataAddress = await this.evaluateAsPointer(
+                session,
+                this.getMemberExpression(expression, typeName, props.data)
+            );
+            if (!dataAddress || this.isNullPointerValue(dataAddress)) {
                 return this.errorResult('Data pointer is null');
             }
 
@@ -137,24 +156,38 @@ export class CustomTypeParser extends BaseImageParser {
             if (props.stride === 'auto') {
                 stride = width * pixelSize;
             } else {
-                const evalStride = await this.evaluateAsInt(session, `${expression}.${props.stride}`);
+                const evalStride = await this.evaluateAsInt(
+                    session,
+                    this.getMemberExpression(expression, typeName, props.stride)
+                );
                 if (evalStride === undefined || evalStride <= 0) {
-                    // Fall back to calculated stride
-                    stride = width * pixelSize;
-                } else {
-                    stride = evalStride;
+                    return this.errorResult(`Failed to read stride from ${props.stride}`);
                 }
+                stride = evalStride;
             }
 
             // Optional validity check
             if (props.isValid) {
-                const isValid = await this.evaluateAsInt(session, `${expression}.${props.isValid}`);
-                if (isValid === 0) {
+                const validityResult = await this.evaluateExpression(
+                    session,
+                    this.getMemberExpression(expression, typeName, props.isValid)
+                );
+                if (!validityResult) {
+                    return this.errorResult(`Failed to evaluate validity from ${props.isValid}`);
+                }
+                const normalizedValidity = validityResult.result.trim().toLowerCase();
+                if (/^(?:false|0)\b/.test(normalizedValidity)) {
                     return this.errorResult('Image validity check failed');
+                }
+                if (!/^true\b/.test(normalizedValidity) && this.parseIntValue(normalizedValidity) === undefined) {
+                    return this.errorResult(`Invalid validity value: ${validityResult.result}`);
                 }
             }
 
-            const dataSize = stride * height;
+            const validationError = this.getImageValidationError(width, height, channels, depth, stride);
+            if (validationError) {
+                return this.errorResult(validationError);
+            }
 
             const metadata: ImageMetadata = {
                 id: this.generateImageId(expression),
@@ -167,7 +200,7 @@ export class CustomTypeParser extends BaseImageParser {
                 height,
                 stride,
                 dataAddress,
-                dataSize,
+                dataSize: 0,
                 isContinuous: stride === width * pixelSize,
                 debuggerType: session.getDebuggerType(),
                 frameId: session.currentFrameId,
@@ -176,6 +209,7 @@ export class CustomTypeParser extends BaseImageParser {
                     configDescription: config.description,
                 },
             };
+            metadata.dataSize = calculateDataSize(metadata);
 
             return this.successResult(metadata);
         } catch (error) {

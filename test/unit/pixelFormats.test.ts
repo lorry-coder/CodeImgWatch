@@ -55,6 +55,11 @@ describe('PixelFormats', () => {
             assert.strictEqual(result.depth, PixelDepth.CV_64F);
             assert.strictEqual(result.channels, 4);
         });
+
+        it('should preserve OpenCV channel counts above 64 for validation', () => {
+            assert.strictEqual(decodeCvType(encodeCvType(PixelDepth.CV_8U, 65)).channels, 65);
+            assert.strictEqual(decodeCvType(encodeCvType(PixelDepth.CV_8U, 512)).channels, 512);
+        });
     });
 
     describe('encodeCvType', () => {

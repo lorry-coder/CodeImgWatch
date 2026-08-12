@@ -1,6 +1,7 @@
 import { DebugSessionManager, EvaluateResponse } from '../core/debugSessionManager';
 import { BaseImageParser } from './baseParser';
 import { ParseResult, ImageMetadata, PixelDepth, PixelDepthSize } from '../types';
+import { calculateDataSize } from '../utils/imageTransform';
 
 /**
  * Map type names to pixel depth for Matx template types
@@ -13,8 +14,14 @@ const MATX_TYPE_MAP: Record<string, PixelDepth> = {
     'unsigned short': PixelDepth.CV_16U,
     'uchar': PixelDepth.CV_8U,
     'unsigned char': PixelDepth.CV_8U,
+    'uint8_t': PixelDepth.CV_8U,
     'schar': PixelDepth.CV_8S,
     'signed char': PixelDepth.CV_8S,
+    'int8_t': PixelDepth.CV_8S,
+    'char': PixelDepth.CV_8S,
+    'uint16_t': PixelDepth.CV_16U,
+    'int16_t': PixelDepth.CV_16S,
+    'int32_t': PixelDepth.CV_32S,
 };
 
 /**
@@ -28,7 +35,7 @@ export class CvMatxParser extends BaseImageParser {
 
     canParse(typeName: string): boolean {
         const normalized = typeName.replace(/^(const\s+)?(class\s+|struct\s+)?/, '').trim();
-        return /^cv::Matx</.test(normalized);
+        return /^cv::Matx(?:<|\d)/.test(normalized);
     }
 
     async parse(
@@ -54,26 +61,34 @@ export class CvMatxParser extends BaseImageParser {
             let dataAddress: string | undefined;
 
             // Try to get address of val member
-            dataAddress = await this.evaluateAsPointer(session, `&(${expression}.val[0])`);
+            const valueExpression = this.getMemberExpression(
+                expression,
+                evaluateResult.type ?? '',
+                'val'
+            );
+            dataAddress = await this.evaluateAsPointer(session, `&(${valueExpression}[0])`);
 
             if (!dataAddress) {
                 // Try alternative: some debuggers might expose it differently
-                const result = await session.evaluate(`${expression}.val`);
+                const result = await session.evaluate(valueExpression);
                 if (result?.memoryReference) {
                     dataAddress = result.memoryReference;
                 }
             }
 
-            if (!dataAddress || dataAddress === '0x0') {
+            if (!dataAddress || this.isNullPointerValue(dataAddress)) {
                 return this.errorResult('Failed to get cv::Matx data address');
             }
 
             const elementSize = PixelDepthSize[depth];
             const stride = cols * elementSize;
-            const dataSize = rows * cols * elementSize;
-
             // Treat as single-channel (Matx is typically used for transforms/vectors)
             const channels = 1;
+
+            const validationError = this.getImageValidationError(cols, rows, channels, depth, stride);
+            if (validationError) {
+                return this.errorResult(validationError);
+            }
 
             const metadata: ImageMetadata = {
                 id: this.generateImageId(expression),
@@ -86,7 +101,7 @@ export class CvMatxParser extends BaseImageParser {
                 height: rows,
                 stride,
                 dataAddress,
-                dataSize,
+                dataSize: 0,
                 isContinuous: true, // Matx data is always continuous
                 debuggerType: session.getDebuggerType(),
                 frameId: session.currentFrameId,
@@ -95,6 +110,7 @@ export class CvMatxParser extends BaseImageParser {
                     isSmallMatrix: true,
                 },
             };
+            metadata.dataSize = calculateDataSize(metadata);
 
             const warnings: string[] = [];
             if (rows > 16 || cols > 16) {
@@ -118,6 +134,16 @@ export class CvMatxParser extends BaseImageParser {
                 elementType: match[1].trim(),
                 rows: parseInt(match[2], 10),
                 cols: parseInt(match[3], 10),
+            };
+        }
+        // GDB commonly preserves OpenCV's official typedef spelling (for example,
+        // cv::Matx33f) instead of returning the expanded template type.
+        const typedefMatch = typeName.match(/cv::Matx(\d)(\d)([fd])\b/i);
+        if (typedefMatch) {
+            return {
+                elementType: typedefMatch[3].toLowerCase() === 'f' ? 'float' : 'double',
+                rows: parseInt(typedefMatch[1], 10),
+                cols: parseInt(typedefMatch[2], 10),
             };
         }
         return undefined;
@@ -151,21 +177,36 @@ export class CvVecParser extends BaseImageParser {
             const { depth, length } = typeInfo;
 
             // Get address of val array
-            let dataAddress = await this.evaluateAsPointer(session, `&(${expression}.val[0])`);
+            const valueExpression = this.getMemberExpression(
+                expression,
+                evaluateResult.type ?? '',
+                'val'
+            );
+            let dataAddress = await this.evaluateAsPointer(session, `&(${valueExpression}[0])`);
 
             if (!dataAddress) {
-                const result = await session.evaluate(`${expression}.val`);
+                const result = await session.evaluate(valueExpression);
                 if (result?.memoryReference) {
                     dataAddress = result.memoryReference;
                 }
             }
 
-            if (!dataAddress || dataAddress === '0x0') {
+            if (!dataAddress || this.isNullPointerValue(dataAddress)) {
                 return this.errorResult('Failed to get cv::Vec data address');
             }
 
             const elementSize = PixelDepthSize[depth];
-            const dataSize = length * elementSize;
+            const stride = length * elementSize;
+            const validationError = this.getImageValidationError(
+                length,
+                1,
+                1,
+                depth,
+                stride
+            );
+            if (validationError) {
+                return this.errorResult(validationError);
+            }
 
             // Represent as 1 x length image with 1 channel
             const metadata: ImageMetadata = {
@@ -177,9 +218,9 @@ export class CvVecParser extends BaseImageParser {
                 channels: 1,
                 width: length,
                 height: 1,
-                stride: dataSize,
+                stride,
                 dataAddress,
-                dataSize,
+                dataSize: 0,
                 isContinuous: true,
                 debuggerType: session.getDebuggerType(),
                 frameId: session.currentFrameId,
@@ -188,6 +229,7 @@ export class CvVecParser extends BaseImageParser {
                     vectorLength: length,
                 },
             };
+            metadata.dataSize = calculateDataSize(metadata);
 
             return this.successResult(metadata);
         } catch (error) {

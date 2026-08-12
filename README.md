@@ -93,7 +93,7 @@ img_np = np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)
 # PIL Image
 img_pil = Image.open('image.jpg')
 
-# PyTorch tensor (CPU only)
+# PyTorch tensor (CPU or accelerator; copied to CPU for display)
 img_torch = torch.rand(3, 64, 64)
 
 breakpoint()  # Set breakpoint here to visualize images
@@ -102,7 +102,7 @@ breakpoint()  # Set breakpoint here to visualize images
 ### Viewing Images from Debug Variables
 
 - **Right-click** on any variable in the VARIABLES or WATCH panel
-- Select **"View Image"** to display the image immediately
+- Select **"View Image"** to add the clicked expression to ImView and display it immediately; no manual re-entry is required
 - Select **"Add to ImView"** to add to the watch list
 
 ### Viewing Images from Editor
@@ -140,8 +140,8 @@ Transform images using `@` operators in watch expressions:
 @thresh(img, t)        - Binary threshold
 @clamp(img, min, max)  - Clamp values
 @scale(img, f)         - Scale by factor
-@norm8(img)            - Normalize /255
-@norm16(img)           - Normalize /65535
+@norm8(img)            - Normalize /255 into float32
+@norm16(img)           - Normalize /65535 into float32
 @diff(img1, img2)      - Absolute difference
 @fliph(img)            - Flip horizontal
 @flipv(img)            - Flip vertical
@@ -151,6 +151,16 @@ Transform images using `@` operators in watch expressions:
 ```
 
 Operators can be nested: `@abs(@diff(img1, img2))`
+
+Raw debugger memory can be watched explicitly:
+
+```text
+@mem(0x12345678, uint8, 3, 640, 480)
+@mem(0x12345678, uint16, 1, 640, 480, 1280)  # optional row stride
+```
+
+The address must be a non-null hexadecimal pointer. Dimensions, channels,
+stride, and configured transfer limits are validated before memory is read.
 
 ## Configuration
 

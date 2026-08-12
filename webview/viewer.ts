@@ -40,6 +40,7 @@ interface DisplayImageMessage {
     byteOrder: 'little' | 'big';
     name: string;
     typeName: string;
+    preserveView: boolean;
 }
 
 interface ClearImageMessage {
@@ -198,6 +199,7 @@ class ImageViewer {
         showGrid?.addEventListener('change', () => {
             this.options.showPixelGrid = showGrid.checked;
             this.pixelInspector.setShowPixelGrid(showGrid.checked);
+            this.notifyOptionsChanged();
         });
 
         // A/B compare button (if exists)
@@ -224,39 +226,66 @@ class ImageViewer {
      * Handle keyboard shortcuts
      */
     private handleKeyDown(e: KeyboardEvent): void {
-        // Ctrl+C: Copy pixel value
-        if (e.ctrlKey && e.key === 'c') {
-            const pixelValue = this.pixelInspector.getCurrentPixelValue();
-            if (pixelValue) {
-                vscode.postMessage({ command: 'copyPixel', value: pixelValue });
-            }
+        if (this.isInteractiveKeyboardTarget(e.target)) {
+            return;
         }
 
+        // Ctrl+C / Cmd+C: Copy pixel value
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'c') {
+            const pixelValue = this.pixelInspector.getCurrentPixelValue();
+            if (pixelValue) {
+                e.preventDefault();
+                vscode.postMessage({ command: 'copyPixel', value: pixelValue });
+            }
+            return;
+        }
+
+        const hasCommandModifier = e.ctrlKey || e.metaKey || e.altKey;
+
         // 0: Actual size
-        if (e.key === '0' && !e.ctrlKey && !e.altKey) {
+        if (e.key === '0' && !hasCommandModifier) {
+            e.preventDefault();
             this.zoomController.actualSize();
+            return;
         }
 
         // F: Fit to window
-        if (e.key === 'f' && !e.ctrlKey && !e.altKey) {
+        if (e.key.toLowerCase() === 'f' && !hasCommandModifier) {
+            e.preventDefault();
             this.zoomController.fitToContainer();
+            return;
         }
 
         // 1-4: Channel view
-        if (['1', '2', '3', '4'].includes(e.key) && !e.ctrlKey && !e.altKey) {
+        if (['1', '2', '3', '4'].includes(e.key) && !hasCommandModifier) {
             const channelSelect = document.getElementById('channel-select') as HTMLSelectElement;
-            if (channelSelect) {
+            const option = channelSelect
+                ? Array.from(channelSelect.options).find(candidate => candidate.value === e.key)
+                : undefined;
+            if (channelSelect && option && !option.hidden && !option.disabled) {
+                e.preventDefault();
                 channelSelect.value = e.key;
                 this.options.channelView = parseInt(e.key, 10);
                 this.updateRender();
+                this.notifyOptionsChanged();
             }
+            return;
         }
 
-        // Space: Toggle A/B compare
-        if (e.key === ' ') {
+        // Space: Toggle A/B compare only in editor views that provide the control.
+        if (e.key === ' ' && !hasCommandModifier && document.getElementById('btn-compare')) {
             e.preventDefault();
             vscode.postMessage({ command: 'toggleCompare' });
         }
+    }
+
+    private isInteractiveKeyboardTarget(target: EventTarget | null): boolean {
+        if (!(target instanceof HTMLElement)) {
+            return false;
+        }
+        return target.isContentEditable || target.closest(
+            'button, input, select, textarea, label, a, [role="button"], [contenteditable="true"]'
+        ) !== null;
     }
 
     /**
@@ -282,6 +311,7 @@ class ImageViewer {
 
             case 'syncView':
                 this.zoomController.setViewState(message.state);
+                this.updateZoomDisplay();
                 this.pixelInspector.updatePixelOverlays();
                 break;
 
@@ -385,6 +415,9 @@ class ImageViewer {
      * Display an image
      */
     private displayImage(message: DisplayImageMessage): void {
+        const previousViewState = message.preserveView && this.currentImageInfo
+            ? this.zoomController.getViewState()
+            : undefined;
         this.hideAllOverlays();
         this.container.classList.add('has-image');
 
@@ -413,6 +446,8 @@ class ImageViewer {
         this.currentImageId = message.id;
         this.currentImageInfo = imageInfo;
 
+        const channelWasReset = this.updateChannelOptions(message.channels, message.channelFormat);
+
         // Render
         const renderOptions: RenderOptions = {
             autoNormalize: this.options.autoNormalize,
@@ -425,7 +460,12 @@ class ImageViewer {
 
         // Update zoom controller
         this.zoomController.setImageSize(message.width, message.height);
-        this.zoomController.fitToContainer();
+        if (previousViewState) {
+            this.zoomController.setViewState(previousViewState);
+            this.pixelInspector.updatePixelOverlays();
+        } else {
+            this.zoomController.fitToContainer();
+        }
 
         // Update info display
         if (this.imageInfoElement) {
@@ -433,17 +473,53 @@ class ImageViewer {
                 `${message.name} - ${message.width}×${message.height} ${message.typeName}`;
         }
 
-        // Update channel select visibility
-        const channelSelect = document.getElementById('channel-select') as HTMLSelectElement;
-        if (channelSelect) {
-            // Show/hide alpha option based on channel count
-            const alphaOption = channelSelect.querySelector('option[value="4"]');
-            if (alphaOption) {
-                (alphaOption as HTMLOptionElement).hidden = message.channels < 4;
-            }
+        if (channelWasReset) {
+            this.notifyOptionsChanged();
         }
 
         this.updateZoomDisplay();
+    }
+
+    /** Keep channel controls and state consistent with the current image layout. */
+    private updateChannelOptions(channels: number, channelFormat?: string): boolean {
+        const availableViews = new Set<number>([0]);
+        const isGrayAlpha = channels === 2 && channelFormat === 'gray-alpha';
+
+        if (channels === 1 || isGrayAlpha) {
+            availableViews.add(1);
+        } else if (channels >= 3) {
+            availableViews.add(1);
+            availableViews.add(2);
+            availableViews.add(3);
+        }
+        if (channels === 4 || isGrayAlpha) {
+            availableViews.add(4);
+        }
+
+        const channelSelect = document.getElementById('channel-select') as HTMLSelectElement;
+        if (channelSelect) {
+            for (const option of Array.from(channelSelect.options)) {
+                const view = parseInt(option.value, 10);
+                const isAvailable = availableViews.has(view);
+                option.hidden = !isAvailable;
+                option.disabled = !isAvailable;
+            }
+
+            const firstChannelOption = Array.from(channelSelect.options)
+                .find(option => option.value === '1');
+            if (firstChannelOption) {
+                firstChannelOption.textContent = channels === 1 || isGrayAlpha ? 'Gray' : 'Red';
+            }
+        }
+
+        const channelWasReset = !availableViews.has(this.options.channelView);
+        if (channelWasReset) {
+            this.options.channelView = 0;
+        }
+        if (channelSelect) {
+            channelSelect.value = this.options.channelView.toString();
+        }
+        return channelWasReset;
     }
 
     /**
@@ -469,11 +545,23 @@ class ImageViewer {
      * Clear the current image
      */
     private clearImage(): void {
+        this.resetRenderedImage();
+        this.showNoImage();
+    }
+
+    private resetRenderedImage(): void {
         this.renderer.clear();
         this.currentImageId = '';
         this.currentImageInfo = null;
         this.container.classList.remove('has-image');
-        this.showNoImage();
+        this.zoomController.setImageSize(0, 0);
+        this.zoomController.reset();
+        this.pixelInspector.updateCursor(-1, -1, -1, -1);
+        this.pixelInspector.updatePixelOverlays();
+        this.updateZoomDisplay();
+        if (this.imageInfoElement) {
+            this.imageInfoElement.textContent = 'No image';
+        }
     }
 
     /**
@@ -491,6 +579,13 @@ class ImageViewer {
         const channelSelect = document.getElementById('channel-select') as HTMLSelectElement;
         if (channelSelect && options.channelView !== undefined) {
             channelSelect.value = options.channelView.toString();
+        }
+
+        if (this.currentImageInfo) {
+            this.updateChannelOptions(
+                this.currentImageInfo.channels,
+                this.currentImageInfo.channelFormat
+            );
         }
 
         const colormapSelect = document.getElementById('colormap-select') as HTMLSelectElement;
@@ -538,6 +633,7 @@ class ImageViewer {
      * Show error message
      */
     private showError(message: string): void {
+        this.resetRenderedImage();
         this.hideAllOverlays();
         if (this.errorElement) {
             this.errorElement.textContent = message;
@@ -579,12 +675,15 @@ class ImageViewer {
     }
 }
 
-// Initialize viewer when DOM is ready
-document.addEventListener('DOMContentLoaded', () => {
+function initializeViewer(): void {
     new ImageViewer();
-});
+}
 
-// Also try to initialize immediately if DOM is already loaded
-if (document.readyState === 'complete' || document.readyState === 'interactive') {
-    new ImageViewer();
+// Choose exactly one initialization path. In particular, `interactive` can be
+// observed before DOMContentLoaded fires, so registering and constructing at
+// the same time would create two viewers and duplicate every event handler.
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializeViewer, { once: true });
+} else {
+    initializeViewer();
 }

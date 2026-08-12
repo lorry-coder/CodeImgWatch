@@ -10,6 +10,52 @@ const PNG_SIGNATURE = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a,
 const DEFAULT_EXPORT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_ENCODED_BYTES = 512 * 1024 * 1024;
 const MAX_EXPORT_BASENAME_UNITS = 240;
+const DEFAULT_EXPORT_FORMAT: ImageExportFormat = 'png';
+
+const EXPORT_FORMAT_OPTIONS: ReadonlyArray<{
+    format: ImageExportFormat;
+    extension: string;
+    label: string;
+    filterLabel: string;
+    extensions: string[];
+    description: string;
+    detail: string;
+    icon: string;
+}> = [
+    {
+        format: 'png',
+        extension: 'png',
+        label: 'PNG',
+        filterLabel: 'PNG Image',
+        extensions: ['png'],
+        description: '.png · Lossless',
+        detail: 'Rendered pixels with transparency; recommended for exact image output.',
+        icon: 'file-media',
+    },
+    {
+        format: 'jpg',
+        extension: 'jpg',
+        label: 'JPEG',
+        filterLabel: 'JPEG Image',
+        extensions: ['jpg', 'jpeg'],
+        description: '.jpg / .jpeg · Smaller file',
+        detail: 'Rendered pixels with transparency composited onto a white background.',
+        icon: 'file-media',
+    },
+    {
+        format: 'bin',
+        extension: 'bin',
+        label: 'Raw Binary',
+        filterLabel: 'Raw Display Buffer',
+        extensions: ['bin'],
+        description: '.bin · Unencoded bytes',
+        detail: 'Unencoded display-buffer bytes; row padding may remain, and metadata is not embedded.',
+        icon: 'file-binary',
+    },
+];
+
+let lastExportDirectory: vscode.Uri | undefined;
+let lastExportFormat: ImageExportFormat | undefined;
 
 interface PendingExport {
     format: EncodedImageExportFormat;
@@ -22,6 +68,14 @@ interface PendingExport {
 export interface ImageExportTarget {
     format: ImageExportFormat;
     uri: vscode.Uri;
+}
+
+interface ImageExportQuickPickItem extends vscode.QuickPickItem {
+    format: ImageExportFormat;
+}
+
+function exportFormatOption(format: ImageExportFormat): typeof EXPORT_FORMAT_OPTIONS[number] {
+    return EXPORT_FORMAT_OPTIONS.find(option => option.format === format) ?? EXPORT_FORMAT_OPTIONS[0];
 }
 
 /** Create a filename that is valid on Windows, macOS, and Linux. */
@@ -61,48 +115,156 @@ export function formatExportLocation(uri: vscode.Uri): string {
     return uri.scheme === 'file' ? uri.fsPath : uri.toString(true);
 }
 
-/** Ask for a format when needed and then select the destination URI. */
+/** Infer the export encoding from a filename. */
+export function inferImageExportFormat(path: string): ImageExportFormat | undefined {
+    const extension = /\.([^.\\/]+)$/.exec(path)?.[1]?.toLowerCase();
+    switch (extension) {
+        case 'png':
+            return 'png';
+        case 'jpg':
+        case 'jpeg':
+            return 'jpg';
+        case 'bin':
+            return 'bin';
+        default:
+            return undefined;
+    }
+}
+
+/** Build a concise suggested filename without duplicating a known image suffix. */
+export function createImageExportFileName(
+    imageName: string,
+    format: ImageExportFormat = DEFAULT_EXPORT_FORMAT
+): string {
+    const option = exportFormatOption(format);
+    const baseName = sanitizeExportBaseName(imageName)
+        .replace(/\.(?:png|jpe?g|bin)$/i, '') || 'image';
+    return `${baseName}.${option.extension}`;
+}
+
+/**
+ * Keep the selected encoding authoritative and normalize the destination suffix.
+ * This avoids relying on platform-specific save-dialog filter behavior.
+ */
+export function resolveImageExportTarget(
+    uri: vscode.Uri | undefined,
+    selectedFormat: ImageExportFormat = DEFAULT_EXPORT_FORMAT
+): ImageExportTarget | undefined {
+    if (!uri) {
+        return undefined;
+    }
+
+    const inferredFormat = inferImageExportFormat(uri.path);
+    if (inferredFormat === selectedFormat) {
+        return { format: selectedFormat, uri };
+    }
+
+    const option = exportFormatOption(selectedFormat);
+    const cleanPath = uri.path.replace(/[. ]+$/g, '');
+    const fileNameStart = cleanPath.lastIndexOf('/') + 1;
+    const suffixStart = cleanPath.lastIndexOf('.');
+    const pathWithoutSuffix = suffixStart > fileNameStart
+        ? cleanPath.slice(0, suffixStart)
+        : cleanPath;
+    return {
+        format: selectedFormat,
+        uri: uri.with({ path: `${pathWithoutSuffix}.${option.extension}` }),
+    };
+}
+
+/** Whether suffix normalization changed the path that received native overwrite confirmation. */
+export function exportTargetNeedsConfirmation(
+    selectedUri: vscode.Uri,
+    target: ImageExportTarget
+): boolean {
+    return selectedUri.toString() !== target.uri.toString();
+}
+
+function orderedExportFormatOptions(
+    preferredFormat: ImageExportFormat
+): typeof EXPORT_FORMAT_OPTIONS {
+    const preferred = exportFormatOption(preferredFormat);
+    return [preferred, ...EXPORT_FORMAT_OPTIONS.filter(option => option !== preferred)];
+}
+
+/** Select an explicit encoding, then choose its destination. */
 export async function promptForImageExport(
     imageName: string,
     requestedFormat?: ImageExportFormat
 ): Promise<ImageExportTarget | undefined> {
-    let format = requestedFormat;
-    let label: string;
-
-    if (!format) {
-        const selection = await vscode.window.showQuickPick(
-            [
-                { label: 'PNG', description: 'Lossless rendered image', value: 'png' as const },
-                { label: 'JPEG', description: 'Rendered image with white background', value: 'jpg' as const },
-                { label: 'Raw Binary', description: 'Display buffer without image encoding', value: 'bin' as const },
-            ],
-            { placeHolder: 'Select export format' }
-        );
-        if (!selection) {
+    let selectedFormat = requestedFormat;
+    if (!selectedFormat) {
+        const preferredFormat = lastExportFormat ?? DEFAULT_EXPORT_FORMAT;
+        const formatItems: ImageExportQuickPickItem[] = orderedExportFormatOptions(preferredFormat)
+            .map(option => ({
+                label: option.label,
+                description: lastExportFormat === option.format
+                    ? `${option.description} · Last used`
+                    : option.description,
+                detail: option.detail,
+                iconPath: new vscode.ThemeIcon(option.icon),
+                format: option.format,
+            }));
+        const selectedItem = await vscode.window.showQuickPick(formatItems, {
+            title: 'Export Image',
+            placeHolder: 'Choose an output format',
+            matchOnDescription: true,
+            matchOnDetail: true,
+        });
+        if (!selectedItem) {
             return undefined;
         }
-        format = selection.value;
-        label = selection.label;
-    } else {
-        label = format === 'png' ? 'PNG' : format === 'jpg' ? 'JPEG' : 'Raw Binary';
+        selectedFormat = selectedItem.format;
     }
 
-    const extension = format === 'jpg' ? 'jpg' : format;
-    const filename = `${sanitizeExportBaseName(imageName)}.${extension}`;
+    const selectedOption = exportFormatOption(selectedFormat);
+    const filename = createImageExportFileName(imageName, selectedFormat);
     const workspaceUri = vscode.workspace.workspaceFolders?.[0]?.uri;
     const activeDocumentUri = vscode.window.activeTextEditor?.document.uri;
-    const defaultUri = workspaceUri
-        ? vscode.Uri.joinPath(workspaceUri, filename)
-        : activeDocumentUri && activeDocumentUri.scheme !== 'untitled'
-            ? vscode.Uri.joinPath(activeDocumentUri, '..', filename)
-            : undefined;
-    const extensions = format === 'jpg' ? ['jpg', 'jpeg'] : [extension];
-    const uri = await vscode.window.showSaveDialog({
-        ...(defaultUri ? { defaultUri } : {}),
-        filters: { [label]: extensions },
-    });
+    const activeWorkspaceUri = activeDocumentUri
+        ? vscode.workspace.getWorkspaceFolder(activeDocumentUri)?.uri
+        : undefined;
+    const defaultDirectory = lastExportDirectory
+        ?? activeWorkspaceUri
+        ?? workspaceUri
+        ?? (activeDocumentUri && activeDocumentUri.scheme !== 'untitled'
+            ? vscode.Uri.joinPath(activeDocumentUri, '..')
+            : undefined);
+    const defaultUri = defaultDirectory
+        ? vscode.Uri.joinPath(defaultDirectory, filename)
+        : undefined;
+    let suggestedUri = defaultUri;
+    let target: ImageExportTarget | undefined;
+    let needsNormalizedConfirmation = false;
+    while (!target) {
+        const selectedUri = await vscode.window.showSaveDialog({
+            ...(suggestedUri ? { defaultUri: suggestedUri } : {}),
+            title: needsNormalizedConfirmation
+                ? `Confirm ${selectedOption.label} Filename`
+                : `Export ${selectedOption.label}`,
+            saveLabel: `Export ${selectedOption.label}`,
+            filters: { [selectedOption.filterLabel]: selectedOption.extensions },
+        });
+        const resolvedTarget = resolveImageExportTarget(selectedUri, selectedFormat);
+        if (!selectedUri || !resolvedTarget) {
+            return undefined;
+        }
+        if (exportTargetNeedsConfirmation(selectedUri, resolvedTarget)) {
+            // The first dialog only confirmed the path the user entered. Reopen it
+            // on the normalized path so an existing real target is never overwritten
+            // without the platform's native confirmation.
+            suggestedUri = resolvedTarget.uri;
+            needsNormalizedConfirmation = true;
+            continue;
+        }
+        target = resolvedTarget;
+    }
+    if (target) {
+        lastExportDirectory = vscode.Uri.joinPath(target.uri, '..');
+        lastExportFormat = target.format;
+    }
 
-    return uri ? { format, uri } : undefined;
+    return target;
 }
 
 /** Decode and validate bytes returned by canvas.toBlob(). */

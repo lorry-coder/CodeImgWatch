@@ -41,6 +41,8 @@ export interface DisplayImageMessage extends BaseMessage {
     name: string;
     /** Full type name */
     typeName: string;
+    /** Keep the existing zoom and pan when replacing the rendered image */
+    preserveView: boolean;
 }
 
 /**
@@ -223,7 +225,8 @@ export function isWebviewMessage(msg: unknown): msg is WebviewToExtensionMessage
  */
 export function createDisplayImageMessage(
     metadata: ImageMetadata,
-    dataBase64: string
+    dataBase64: string,
+    preserveView: boolean = false
 ): DisplayImageMessage {
     return {
         command: 'displayImage',
@@ -238,6 +241,7 @@ export function createDisplayImageMessage(
         byteOrder: metadata.byteOrder ?? 'little',
         name: metadata.name,
         typeName: metadata.typeName,
+        preserveView,
     };
 }
 

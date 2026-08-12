@@ -86,11 +86,6 @@
         "category": "ImView"
       },
       {
-        "command": "imview.copyPixelValue",
-        "title": "Copy Pixel Value",
-        "category": "ImView"
-      },
-      {
         "command": "imview.visualizeVariable",
         "title": "View Image",
         "icon": "$(eye)",
@@ -136,7 +131,7 @@
       "view/item/context": [
         {
           "command": "imview.openInEditor",
-          "when": "view == imview.imageList && viewItem == imageItem",
+          "when": "view == imview.imageList && (viewItem == imageItem || viewItem == watchItem)",
           "group": "inline"
         },
         {
@@ -146,7 +141,7 @@
         },
         {
           "command": "imview.removeWatch",
-          "when": "view == imview.imageList && viewItem == watchItem",
+          "when": "view == imview.imageList && (viewItem == watchItem || viewItem == watchItemUnavailable)",
           "group": "2_modify"
         }
       ],
@@ -154,38 +149,42 @@
         {
           "command": "imview.visualizeVariable",
           "group": "3_modifications@1",
-          "when": "inDebugMode && imview.hasImageVariables"
+          "when": "inDebugMode && (debugType == cppdbg || debugType == cppvsdbg || debugType == lldb || debugType == debugpy)"
         },
         {
           "command": "imview.addToWatch",
           "group": "3_modifications@2",
-          "when": "inDebugMode && imview.hasImageVariables"
+          "when": "inDebugMode && (debugType == cppdbg || debugType == cppvsdbg || debugType == lldb || debugType == debugpy)"
         }
       ],
       "editor/context": [
         {
           "command": "imview.visualizeVariable",
-          "when": "inDebugMode && editorTextFocus",
+          "when": "inDebugMode && editorTextFocus && (debugType == cppdbg || debugType == cppvsdbg || debugType == lldb || debugType == debugpy)",
           "group": "9_imview"
         },
         {
           "command": "imview.addToWatch",
-          "when": "inDebugMode && editorHasSelection",
+          "when": "inDebugMode && editorHasSelection && (debugType == cppdbg || debugType == cppvsdbg || debugType == lldb || debugType == debugpy)",
           "group": "9_imview"
         }
       ],
       "commandPalette": [
         {
           "command": "imview.visualizeVariable",
-          "when": "inDebugMode"
+          "when": "inDebugMode && (debugType == cppdbg || debugType == cppvsdbg || debugType == lldb || debugType == debugpy)"
         },
         {
           "command": "imview.addToWatch",
-          "when": "inDebugMode"
+          "when": "inDebugMode && (debugType == cppdbg || debugType == cppvsdbg || debugType == lldb || debugType == debugpy)"
         },
         {
           "command": "imview.openViewerPanel",
-          "when": "inDebugMode"
+          "when": "inDebugMode && (debugType == cppdbg || debugType == cppvsdbg || debugType == lldb || debugType == debugpy)"
+        },
+        {
+          "command": "imview.removeWatch",
+          "when": "false"
         }
       ]
     },
@@ -242,11 +241,6 @@
           "maximum": 1,
           "description": "JPEG export quality from 0.1 to 1.0"
         },
-        "imview.thumbnailSize": {
-          "type": "number",
-          "default": 64,
-          "description": "Size of thumbnail images in the list view"
-        },
         "imview.autoNormalize": {
           "type": "boolean",
           "default": true,
@@ -262,34 +256,36 @@
           "default": 8,
           "description": "Minimum zoom level to show pixel grid"
         },
-        "imview.viewerLocation": {
-          "type": "string",
-          "default": "panel",
-          "enum": [
-            "panel",
-            "editor",
-            "sidebar"
-          ],
-          "enumDescriptions": [
-            "Show in bottom panel (can be moved to right sidebar)",
-            "Show in editor tab",
-            "Show in left sidebar"
-          ],
-          "description": "Default location for the Image Viewer"
-        },
         "imview.customTypes": {
           "type": "array",
           "default": [],
           "description": "Custom image type definitions",
           "items": {
             "type": "object",
+            "required": [
+              "typeName",
+              "properties"
+            ],
             "properties": {
               "typeName": {
                 "type": "string",
+                "minLength": 1,
                 "description": "The C++ type name to match"
+              },
+              "description": {
+                "type": "string",
+                "description": "Optional description shown for this custom image type"
               },
               "properties": {
                 "type": "object",
+                "required": [
+                  "width",
+                  "height",
+                  "channels",
+                  "data",
+                  "stride",
+                  "pixelType"
+                ],
                 "properties": {
                   "width": {
                     "type": "string",
@@ -300,7 +296,12 @@
                     "description": "Expression to get height"
                   },
                   "channels": {
-                    "type": "string",
+                    "type": [
+                      "string",
+                      "number"
+                    ],
+                    "minimum": 1,
+                    "maximum": 4,
                     "description": "Expression to get channel count"
                   },
                   "data": {
@@ -309,7 +310,7 @@
                   },
                   "stride": {
                     "type": "string",
-                    "description": "Expression to get row stride"
+                    "description": "Expression to get row stride, or 'auto' for packed rows"
                   },
                   "pixelType": {
                     "type": "string",
@@ -323,6 +324,10 @@
                       "float64"
                     ],
                     "description": "Pixel data type"
+                  },
+                  "isValid": {
+                    "type": "string",
+                    "description": "Optional boolean expression indicating whether the buffer is valid"
                   }
                 }
               }

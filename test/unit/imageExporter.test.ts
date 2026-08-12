@@ -1,9 +1,14 @@
 import * as assert from 'assert';
 import {
+    createImageExportFileName,
     decodeEncodedImage,
+    exportTargetNeedsConfirmation,
+    inferImageExportFormat,
+    resolveImageExportTarget,
     sanitizeExportBaseName,
     WebviewImageExporter,
 } from '../../src/core/imageExporter';
+import * as vscode from 'vscode';
 import { RequestImageExportMessage } from '../../src/types/messages';
 
 const PNG_BYTES = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -33,6 +38,56 @@ describe('Image exporter', () => {
             const sanitized = sanitizeExportBaseName('🖼️'.repeat(200));
             assert.ok(Buffer.byteLength(sanitized, 'utf8') <= 240);
             assert.ok(sanitized.length <= 240);
+        });
+    });
+
+    describe('export target selection', () => {
+        it('infers PNG, JPEG, and raw formats case-insensitively', () => {
+            assert.strictEqual(inferImageExportFormat('/tmp/frame.PNG'), 'png');
+            assert.strictEqual(inferImageExportFormat('C:\\images\\frame.JPEG'), 'jpg');
+            assert.strictEqual(inferImageExportFormat('/tmp/frame.bin'), 'bin');
+            assert.strictEqual(inferImageExportFormat('/tmp/frame.webp'), undefined);
+        });
+
+        it('does not duplicate an existing supported extension in suggestions', () => {
+            assert.strictEqual(createImageExportFileName('frame.png', 'png'), 'frame.png');
+            assert.strictEqual(createImageExportFileName('frame.jpeg', 'jpg'), 'frame.jpg');
+            assert.strictEqual(createImageExportFileName('frame.bin', 'png'), 'frame.png');
+        });
+
+        it('keeps the explicitly selected format authoritative', () => {
+            const target = resolveImageExportTarget(vscode.Uri.file('/tmp/frame.jpeg'), 'png');
+            assert.strictEqual(target?.format, 'png');
+            assert.strictEqual(target?.uri.fsPath, vscode.Uri.file('/tmp/frame.png').fsPath);
+        });
+
+        it('adds the selected extension when the platform omits it', () => {
+            const target = resolveImageExportTarget(vscode.Uri.file('/tmp/frame'), 'bin');
+            assert.strictEqual(target?.format, 'bin');
+            assert.strictEqual(target?.uri.fsPath, vscode.Uri.file('/tmp/frame.bin').fsPath);
+        });
+
+        it('replaces unsupported suffixes but preserves an equivalent JPEG suffix', () => {
+            const rawTarget = resolveImageExportTarget(vscode.Uri.file('/tmp/frame.webp'), 'bin');
+            const jpegTarget = resolveImageExportTarget(vscode.Uri.file('/tmp/frame.jpeg'), 'jpg');
+            assert.strictEqual(rawTarget?.uri.fsPath, vscode.Uri.file('/tmp/frame.bin').fsPath);
+            assert.strictEqual(jpegTarget?.uri.fsPath, vscode.Uri.file('/tmp/frame.jpeg').fsPath);
+        });
+
+        it('preserves cancellation without creating an export target', () => {
+            assert.strictEqual(resolveImageExportTarget(undefined, 'png'), undefined);
+        });
+
+        it('requires native overwrite confirmation when suffix normalization changes the URI', () => {
+            const selected = vscode.Uri.file('/tmp/frame.jpg');
+            const normalized = resolveImageExportTarget(selected, 'png');
+            assert.ok(normalized);
+            assert.strictEqual(exportTargetNeedsConfirmation(selected, normalized), true);
+
+            const confirmed = vscode.Uri.file('/tmp/frame.png');
+            const unchanged = resolveImageExportTarget(confirmed, 'png');
+            assert.ok(unchanged);
+            assert.strictEqual(exportTargetNeedsConfirmation(confirmed, unchanged), false);
         });
     });
 

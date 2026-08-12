@@ -23,6 +23,7 @@ const PIL_MODE_MAP: Record<string, PILModeInfo> = {
     'L': { channels: 1, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.GRAY },      // 8-bit grayscale
     'P': { channels: 4, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGBA, conversionMode: 'RGBA' },
     'RGB': { channels: 3, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGB },     // 3x8-bit RGB
+    'RGBX': { channels: 3, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGB, conversionMode: 'RGB' },
     'RGBA': { channels: 4, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGBA },   // 4x8-bit RGBA
     'CMYK': { channels: 3, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGB, conversionMode: 'RGB' },
     'YCbCr': { channels: 3, depth: PixelDepth.CV_8U, channelFormat: ChannelFormat.RGB, conversionMode: 'RGB' },
@@ -47,7 +48,9 @@ export class PILImageParser extends BaseImageParser {
     readonly priority = 90; // Slightly lower than numpy
 
     canParse(typeName: string): boolean {
-        return /\bImage\b/.test(typeName) || /PIL\.Image/.test(typeName);
+        return /\bImage\b/.test(typeName) ||
+               /PIL\.Image/.test(typeName) ||
+               /\b(?:[A-Za-z_]\w*)?ImageFile\b/.test(typeName);
     }
 
     async parse(
@@ -55,8 +58,10 @@ export class PILImageParser extends BaseImageParser {
         expression: string
     ): Promise<ParseResult> {
         try {
+            const sourceExpression = `(${expression})`;
+
             // Get image size (width, height)
-            const size = await session.evaluatePythonAsTuple(`${expression}.size`);
+            const size = await session.evaluatePythonAsTuple(`${sourceExpression}.size`);
             if (!size || size.length !== 2) {
                 return this.errorResult('Failed to get image size');
             }
@@ -64,7 +69,7 @@ export class PILImageParser extends BaseImageParser {
             const [width, height] = size;
 
             // Get image mode
-            const mode = await session.evaluatePythonAsString(`${expression}.mode`);
+            const mode = await session.evaluatePythonAsString(`${sourceExpression}.mode`);
             if (!mode) {
                 return this.errorResult('Failed to get image mode');
             }

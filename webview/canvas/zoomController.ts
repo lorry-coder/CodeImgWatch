@@ -7,6 +7,25 @@ export interface ViewState {
     panY: number;
 }
 
+const MIN_ZOOM = 0.1;
+const MAX_ZOOM = 64;
+const MAX_PAN_OFFSET = 10_000_000;
+
+/** Normalize externally supplied view state before applying it to CSS transforms. */
+export function normalizeViewState(state: ViewState, fallback: ViewState): ViewState {
+    const zoom = Number.isFinite(state.zoom)
+        ? Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, state.zoom))
+        : fallback.zoom;
+    const panX = Number.isFinite(state.panX)
+        ? Math.max(-MAX_PAN_OFFSET, Math.min(MAX_PAN_OFFSET, state.panX))
+        : fallback.panX;
+    const panY = Number.isFinite(state.panY)
+        ? Math.max(-MAX_PAN_OFFSET, Math.min(MAX_PAN_OFFSET, state.panY))
+        : fallback.panY;
+
+    return { zoom, panX, panY };
+}
+
 /**
  * Controller for zoom and pan interactions
  */
@@ -24,8 +43,8 @@ export class ZoomController {
     private imageWidth: number = 0;
     private imageHeight: number = 0;
 
-    private minZoom: number = 0.1;
-    private maxZoom: number = 64;
+    private minZoom: number = MIN_ZOOM;
+    private maxZoom: number = MAX_ZOOM;
 
     private canvas: HTMLCanvasElement;
     private container: HTMLElement;
@@ -92,9 +111,10 @@ export class ZoomController {
      * Set view state (for syncing)
      */
     setViewState(state: ViewState): void {
-        this.zoom = state.zoom;
-        this.panX = state.panX;
-        this.panY = state.panY;
+        const normalized = normalizeViewState(state, this.getViewState());
+        this.zoom = normalized.zoom;
+        this.panX = normalized.panX;
+        this.panY = normalized.panY;
         this.applyTransform();
     }
 
@@ -140,10 +160,15 @@ export class ZoomController {
      * Set zoom level
      */
     setZoom(zoom: number, centerX?: number, centerY?: number): void {
+        if (!Number.isFinite(zoom)) {
+            return;
+        }
+
         const oldZoom = this.zoom;
         this.zoom = Math.max(this.minZoom, Math.min(this.maxZoom, zoom));
 
-        if (centerX !== undefined && centerY !== undefined) {
+        if (centerX !== undefined && centerY !== undefined &&
+            Number.isFinite(centerX) && Number.isFinite(centerY)) {
             // Zoom around the specified point
             const scale = this.zoom / oldZoom;
             this.panX = centerX - (centerX - this.panX) * scale;

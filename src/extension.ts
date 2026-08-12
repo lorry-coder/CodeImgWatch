@@ -1,47 +1,18 @@
 import * as vscode from 'vscode';
 import { DebugSessionManager } from './core/debugSessionManager';
-import { registerBuiltInParsers, ImageParserRegistry, isKnownImageType, normalizeTypeName } from './parsers';
+import { registerBuiltInParsers, ImageParserRegistry } from './parsers';
 import { ImageListProvider, ImageTreeItem } from './providers/imageListProvider';
 import { ImageViewerProvider } from './providers/imageViewerProvider';
 import { ImageEditorManager } from './providers/imageEditorProvider';
-import { DebugVariableDecorator, ImageWatchDebugAdapterTrackerFactory } from './providers/debugVariableDecorator';
+import { ImageWatchDebugAdapterTrackerFactory } from './providers/debugVariableDecorator';
 import { ImageItem } from './types';
+import { getDebugVariableDetails } from './utils/debugVariableContext';
 
 let sessionManager: DebugSessionManager;
 let imageListProvider: ImageListProvider;
 let imageViewerProvider: ImageViewerProvider;
 let imageEditorManager: ImageEditorManager;
-let debugVariableDecorator: DebugVariableDecorator;
 let debugAdapterTrackerFactory: ImageWatchDebugAdapterTrackerFactory;
-
-interface DebugVariableContext {
-    evaluateName?: string;
-    name?: string;
-    type?: string;
-    variable?: DebugVariableContext;
-    container?: DebugVariableContext;
-}
-
-function getDebugVariableContext(value: unknown): DebugVariableContext | undefined {
-    return typeof value === 'object' && value !== null
-        ? value as DebugVariableContext
-        : undefined;
-}
-
-function getDebugVariableDetails(value: unknown): { expression?: string; typeName?: string } {
-    const context = getDebugVariableContext(value);
-    if (!context) {
-        return {};
-    }
-
-    const nested = context.variable;
-    const container = context.container;
-    return {
-        expression: context.evaluateName ?? context.name ?? nested?.evaluateName ?? nested?.name
-            ?? container?.evaluateName ?? container?.name,
-        typeName: context.type ?? nested?.type ?? container?.type,
-    };
-}
 
 /**
  * Extension activation
@@ -59,7 +30,6 @@ export function activate(context: vscode.ExtensionContext): void {
     imageListProvider = new ImageListProvider(context);
     imageViewerProvider = new ImageViewerProvider(context.extensionUri);
     imageEditorManager = new ImageEditorManager(context.extensionUri);
-    debugVariableDecorator = new DebugVariableDecorator();
 
     // Register debug adapter tracker factory for intercepting variable info
     debugAdapterTrackerFactory = new ImageWatchDebugAdapterTrackerFactory();
@@ -101,6 +71,34 @@ export function activate(context: vscode.ExtensionContext): void {
         }
     });
 
+    // Keep every open viewer tied to the freshly parsed item from the current stop.
+    imageListProvider.onDidRefreshImages((items) => {
+        // Serialize pixel reads: debugger adapters are easily stalled by several
+        // large readMemory/evaluate requests from multiple visible views.
+        void (async () => {
+            await imageViewerProvider.updateImages(items);
+            await imageEditorManager.updateItems(items);
+        })();
+    });
+
+    const invalidateImageDisplays = (): void => {
+        imageViewerProvider.invalidateDisplay();
+        imageEditorManager.invalidateDisplays();
+    };
+    context.subscriptions.push(
+        sessionManager.onDidStopOnBreakpoint(() => {
+            // A stack-frame switch can emit another stop without a preceding
+            // continue event. Never leave pixels from the previous frame visible.
+            invalidateImageDisplays();
+        }),
+        sessionManager.onDidContinue(() => {
+            invalidateImageDisplays();
+        }),
+        sessionManager.onDidChangeSession(() => {
+            invalidateImageDisplays();
+        })
+    );
+
     // Sync view states between sidebar and editor panels
     imageViewerProvider.onDidChangeViewState((state) => {
         imageEditorManager.syncViewState('sidebar', state);
@@ -118,8 +116,12 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((e) => {
             if (e.affectsConfiguration('imview')) {
+                ImageParserRegistry.getInstance().reloadConfiguration();
                 imageViewerProvider.reloadConfiguration();
                 imageEditorManager.reloadConfiguration();
+                if (sessionManager.isPaused) {
+                    void imageListProvider.refresh();
+                }
             }
         })
     );
@@ -129,7 +131,6 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(imageListProvider);
     context.subscriptions.push(imageViewerProvider);
     context.subscriptions.push(imageEditorManager);
-    context.subscriptions.push(debugVariableDecorator);
 
     console.log('ImView extension activated');
 }
@@ -210,13 +211,6 @@ function registerCommands(context: vscode.ExtensionContext): void {
         )
     );
 
-    // Copy pixel value
-    context.subscriptions.push(
-        vscode.commands.registerCommand('imview.copyPixelValue', async () => {
-            // This is triggered from the webview via message
-        })
-    );
-
     // Add watch from selection (context menu in editor)
     context.subscriptions.push(
         vscode.commands.registerCommand('imview.addWatchFromSelection', async () => {
@@ -255,17 +249,18 @@ function registerCommands(context: vscode.ExtensionContext): void {
     // Add a variable to the watch list (from context menu - no dialog)
     context.subscriptions.push(
         vscode.commands.registerCommand('imview.addToWatch', async (debugVariable?: unknown) => {
-            let expression: string | undefined;
+            const details = getDebugVariableDetails(debugVariable);
+            let expression = details.expression;
 
-            // First, try to extract from debug variable object (from VARIABLES/WATCH panel)
-            expression = getDebugVariableDetails(debugVariable).expression;
-
-            if (typeof debugVariable === 'string') {
-                expression = debugVariable;
+            if (details.sessionId && details.sessionId !== sessionManager.activeSession?.id) {
+                vscode.window.showWarningMessage(
+                    'The selected variable belongs to a different debug session.'
+                );
+                return;
             }
 
             // If no expression from debug variable, try editor selection
-            if (!expression) {
+            if (!expression && !details.isVariablesViewContext) {
                 const editor = vscode.window.activeTextEditor;
                 if (editor && !editor.selection.isEmpty) {
                     expression = editor.document.getText(editor.selection).trim();
@@ -278,7 +273,16 @@ function registerCommands(context: vscode.ExtensionContext): void {
                 return;
             }
 
-            await imageListProvider.addWatch(expression);
+            if (getWatchItem(expression)) {
+                vscode.window.showInformationMessage(`"${expression}" is already in the ImView watch list`);
+                return;
+            }
+
+            const item = await imageListProvider.addWatch(expression);
+            if (!item) {
+                vscode.window.showWarningMessage(`Could not add "${expression}" to ImView`);
+                return;
+            }
             vscode.window.showInformationMessage(`Added "${expression}" to ImView`);
         })
     );
@@ -305,6 +309,32 @@ function registerCommands(context: vscode.ExtensionContext): void {
     );
 }
 
+function getWatchItem(expression: string): ImageItem | undefined {
+    const item = imageListProvider.getImageById(`watch_${expression}`);
+    return item?.isWatch && item.expression === expression ? item : undefined;
+}
+
+/**
+ * Adds Variables-view selections to Watch before displaying them. addWatch()
+ * resolves a newly added expression while paused, so reusing the stored item
+ * avoids evaluating the same debugger expression twice.
+ */
+async function getImageForVisualization(
+    expression: string,
+    persistInWatch: boolean
+): Promise<ImageItem | undefined> {
+    if (!persistInWatch) {
+        return imageListProvider.resolveImageItem(expression, false);
+    }
+
+    const existing = getWatchItem(expression);
+    if (existing) {
+        return imageListProvider.ensureWatchImage(expression);
+    }
+
+    return imageListProvider.addWatch(expression);
+}
+
 /**
  * Visualize a debug variable
  */
@@ -320,18 +350,23 @@ async function visualizeDebugVariable(debugVariable?: unknown, openInEditor: boo
         return;
     }
 
-    let expression: string | undefined;
-
-    // First, try to extract from debug variable object (from VARIABLES/WATCH panel)
     const details = getDebugVariableDetails(debugVariable);
-    expression = details.expression;
+    let expression = details.expression;
     const typeName = details.typeName;
 
-    if (typeof debugVariable === 'string') {
-        expression = debugVariable;
+    if (details.sessionId && details.sessionId !== sessionManager.activeSession.id) {
+        vscode.window.showWarningMessage('The selected variable belongs to a different debug session.');
+        return;
     }
 
-    // If no expression from debug variable, try editor selection
+    // Variables-view commands must use the clicked variable, never unrelated
+    // editor text or a manual prompt.
+    if (!expression && details.isVariablesViewContext) {
+        vscode.window.showWarningMessage('The selected variable does not provide an evaluatable name.');
+        return;
+    }
+
+    // Editor and command-palette invocations retain their existing fallbacks.
     if (!expression) {
         const editor = vscode.window.activeTextEditor;
         if (editor && !editor.selection.isEmpty) {
@@ -354,72 +389,29 @@ async function visualizeDebugVariable(debugVariable?: unknown, openInEditor: boo
 
     // Show progress
     await vscode.window.withProgress({
-        location: vscode.ProgressLocation.Notification,
+        location: vscode.ProgressLocation.Window,
         title: `Loading image: ${expression}`,
         cancellable: false
     }, async (progress) => {
         try {
-            // Evaluate the expression
-            progress.report({ message: 'Evaluating expression...' });
-            const evalResult = await sessionManager.evaluate(expression!);
-
-            if (!evalResult) {
-                vscode.window.showErrorMessage(`Failed to evaluate "${expression}". Make sure the variable is in scope.`);
-                return;
-            }
-
-            const actualTypeName = evalResult.type || typeName || '';
-            const normalizedType = normalizeTypeName(actualTypeName);
-
-            // Check if it's a known image type
-            if (!isKnownImageType(normalizedType)) {
-                // Ask user if they want to try anyway
-                const choice = await vscode.window.showWarningMessage(
-                    `"${actualTypeName || 'unknown type'}" is not a recognized image type (cv::Mat, etc.). Try to visualize anyway?`,
-                    'Try Anyway', 'Cancel'
-                );
-                if (choice !== 'Try Anyway') {
-                    return;
-                }
-            }
-
-            // Find parser
-            const registry = ImageParserRegistry.getInstance();
-            const parser = registry.findParser(normalizedType);
-
-            if (!parser) {
-                vscode.window.showErrorMessage(
-                    `No parser available for type: ${actualTypeName || 'unknown'}\n` +
-                    'Supported types: cv::Mat, cv::Mat_<T>, cv::Matx, CvMat, IplImage.\n' +
-                    'You can configure custom types in settings.'
-                );
-                return;
-            }
-
-            // Parse the image
             progress.report({ message: 'Parsing image structure...' });
-            const parseResult = await parser.parse(sessionManager, expression!, evalResult);
-
-            if (!parseResult.success || !parseResult.metadata) {
+            const imageItem = await getImageForVisualization(
+                expression!,
+                details.isVariablesViewContext
+            );
+            if (!imageItem) {
                 vscode.window.showErrorMessage(
-                    `Failed to parse image "${expression}": ${parseResult.error || 'Unknown error'}`
+                    `Failed to add "${expression}" to the ImView watch list. Please try again.`
                 );
                 return;
             }
-
-            // Create ImageItem
-            const imageItem: ImageItem = {
-                id: `quick_${Date.now()}_${expression}`,
-                label: expression!,
-                description: `${parseResult.metadata.width}×${parseResult.metadata.height} ${parseResult.metadata.typeName}`,
-                tooltip: `${expression}: ${actualTypeName}`,
-                expression: expression!,
-                isWatch: true,  // Mark as watch item
-                metadata: parseResult.metadata
-            };
-
-            // Also add to watch list (if not already there)
-            await imageListProvider.addWatch(expression!);
+            if (!imageItem.metadata) {
+                vscode.window.showErrorMessage(
+                    `Failed to parse image "${expression}": ${imageItem.error ?? typeName ?? 'Unknown error'}. ` +
+                    'Use Refresh Images to retry.'
+                );
+                return;
+            }
 
             // Display the image
             progress.report({ message: 'Reading image data...' });
@@ -434,13 +426,6 @@ async function visualizeDebugVariable(debugVariable?: unknown, openInEditor: boo
                 } catch {
                     // Ignore focus errors
                 }
-            }
-
-            // Show warnings if any
-            if (parseResult.warnings && parseResult.warnings.length > 0) {
-                vscode.window.showWarningMessage(
-                    `Image loaded with warnings: ${parseResult.warnings.join(', ')}`
-                );
             }
 
         } catch (error) {
