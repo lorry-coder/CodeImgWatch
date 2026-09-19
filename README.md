@@ -253,7 +253,7 @@ The extension recognizes OpenCV types by their type names. If using a custom typ
 
 ## License
 
-MIT
+MIT. See the `LICENSE.txt` file included with this extension.
 
 ## Contributing
 

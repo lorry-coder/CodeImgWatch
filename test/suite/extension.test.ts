@@ -3,13 +3,14 @@ import * as vscode from 'vscode';
 
 describe('Extension Test Suite', () => {
     vscode.window.showInformationMessage('Starting extension tests.');
+    const extensionId = 'lorry-coder.imview';
 
     it('Extension should be present', () => {
-        assert.ok(vscode.extensions.getExtension('imview.imview'));
+        assert.ok(vscode.extensions.getExtension(extensionId));
     });
 
     it('Should activate extension', async () => {
-        const ext = vscode.extensions.getExtension('imview.imview');
+        const ext = vscode.extensions.getExtension(extensionId);
         if (ext) {
             await ext.activate();
             assert.ok(ext.isActive);
